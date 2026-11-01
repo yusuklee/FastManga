@@ -40,6 +40,7 @@ def main():
     shutil.copytree(os.path.join(ROOT, "Process"), os.path.join(APP, "Process"), ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copytree(os.path.join(ROOT, "frontend", "dist"), os.path.join(APP, "frontend", "dist"))
     shutil.copytree(os.path.join(ROOT, "fonts"), os.path.join(APP, "fonts"))
+    shutil.copytree(os.path.join(ROOT, "models"), os.path.join(APP, "models"))   # 효과음 스타일 모델 (sfx_ar.pt)
     with open(os.path.join(OUT, "MangaTranslator.bat"), "w", encoding="ascii", newline="") as f:
         f.write("\r\n".join([
             "@echo off",

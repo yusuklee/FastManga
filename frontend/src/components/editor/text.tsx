@@ -1,18 +1,25 @@
 import { memo, useState } from "react";
-import type { Content } from "../../Project";
+import type { Content, FontChoice } from "../../Project";
+import { FontPicker } from "./fontpicker";
+
+const PAGE_FONT: FontChoice = { family: "Page font" }; //상자 폰트 안 정함 = 설정의 폰트
 
 //오른쪽 글자 목록. 항목을 누르면 원문과 번역문 입력칸이 펼쳐진다
 export const Text = memo(function Text({
   contents,
+  fonts,
   selectedArea,
   onSelect,
   onEdit,
+  onRemove,
   onCollapse,
 }: {
   contents: Content[];
+  fonts: FontChoice[]; //상자별 폰트 선택지
   selectedArea: string | null;
   onSelect: (key: string | null) => void;
-  onEdit: (id: number, translated: string) => void; //번역문 직접 고치기 → 그림·내보내기에 반영
+  onEdit: (id: number, patch: Partial<Content>) => void; //번역문·폰트·크기 직접 고치기 → 그림·내보내기에 반영
+  onRemove?: (id: number) => void; //상자 지우기 (오탐)
   onCollapse?: () => void; //패널 접기 (VS Code 사이드바처럼)
 }) {
   const [openGroup, setOpenGroup] = useState(true);
@@ -60,9 +67,26 @@ export const Text = memo(function Text({
                       rows={2}
                       placeholder="Type the translation"
                       onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => onEdit(c.id, e.target.value)}
+                      onChange={(e) => onEdit(c.id, { translated: e.target.value })}
                       className="mt-0.5 w-full resize-y rounded-md border bg-background px-2 py-1 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
                     />
+                    <div className="mt-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-medium text-muted-foreground">Font</p>
+                        <FontPicker inline fonts={[PAGE_FONT, ...fonts]} value={fonts.find((f) => f.family === c.font) ?? PAGE_FONT} onChange={(f) => onEdit(c.id, { font: f === PAGE_FONT ? undefined : f.family })} />
+                      </div>
+                      <label className="w-20">
+                        <p className="text-[10px] font-medium text-muted-foreground">Size px</p>
+                        <input
+                          type="number" min={4} max={999} placeholder="auto" value={c.size ?? ""}
+                          onChange={(e) => onEdit(c.id, { size: e.target.value ? Math.max(4, Number(e.target.value)) : undefined })}
+                          className="h-8 w-full rounded-lg border bg-background px-2 text-sm outline-none focus:border-primary"
+                        />
+                      </label>
+                      {onRemove && (
+                        <button type="button" className="mt-4 h-8 rounded-lg border px-2 text-xs text-destructive hover:bg-muted" onClick={() => onRemove(c.id)} title="Remove this box">Delete</button>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>

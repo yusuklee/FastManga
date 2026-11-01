@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 import io, os, json
-from Process.detect_ocr import detect_ocr_page
+from Process.detect_ocr import detect_boxes, ocr_boxes, paddle_prepare, paddle_status
 from Process.translate import req_and_fill_res, local_prepare, local_status
-from Process.inpaint import inpaint_white, inpaint_lama
+from Process.inpaint import inpaint_lama
 from fonts.fonts import list_korean_fonts, FONTS_DIR
 from google.genai import errors as genai_errors
 ROOT = os.path.dirname(__file__)
@@ -21,22 +21,32 @@ def png_response(out):
     return Response(buf.getvalue(), media_type="image/png")
 
 
-#상자 찾기 + OCR (+ 마스크, 말풍선, 글자 크기·색)
-#classes: "text" 또는 "text,onomatopoeia" (설정의 Detect 항목). 한 번의 RF-DETR 로 둘 다 나오니 종류만 고른다
 @app.post("/detect")
 async def detect(file: UploadFile, classes: str = Form("text")):
     wanted = tuple(c.strip() for c in classes.split(",") if c.strip()) or ("text",)
-    return detect_ocr_page(Image.open(io.BytesIO(await file.read())), wanted)
+    return detect_boxes(Image.open(io.BytesIO(await file.read())), wanted)
 
 
+@app.post("/ocr")
+async def ocr_route(file: UploadFile, contents: str = Form(...), ocr: str = Form("hayai")):
+    return ocr_boxes(Image.open(io.BytesIO(await file.read())), json.loads(contents), ocr)
 
-#local 이면 이 PC 의 llama-server. base_url 이 있으면 ChatGPT·Claude·OpenAI(사용자 등록), 키는 X-Api-Key 헤더
-#둘 다 없으면 Gemini, 키는 X-Gemini-Key
+
+@app.post("/paddle_ocr/prepare")
+def paddle_ocr_prepare():
+    paddle_prepare()
+    return paddle_status
+
+
+@app.get("/paddle_ocr/status")
+def paddle_ocr_status():
+    return paddle_status
+
+
 @app.post("/translate")
 def translate(body: dict, api_key: str | None = Header(default=None, alias="X-Api-Key")):
     local =body.get("local",False)
     base_url = body.get("base_url")
-    # return ask_openai(local_ensure(model), model, system, payload, local=True)
     if base_url !=None and base_url.strip()=="":
         raise HTTPException(400, "enter the Base URL in Settings")
 
@@ -59,7 +69,7 @@ def translate(body: dict, api_key: str | None = Header(default=None, alias="X-Ap
     else:
         try:
             return req_and_fill_res(body["lines"], body.get("source", None), body.get("target", "English"),
-                                    body.get("model"), base_url=base_url, api_key=api_key)
+                                    body.get("model"), base_url=base_url, api_key=api_key, model2=body.get("model2"))
 
         except genai_errors.APIError as e:  # 키가 틀리거나(400/403) 한도(429) 등 API 쪽 오류 -> 그 코드와 메시지를 그대로
             raise HTTPException(e.code ,f" Gemini: {e.message}")
@@ -69,7 +79,6 @@ def translate(body: dict, api_key: str | None = Header(default=None, alias="X-Ap
             raise HTTPException(c if 400 <= (c or 0) < 600 else 502, str(e))
 
 
-#Local 번역 준비: 프런트가 TRANSLATE·PROCESS 전에 부르고, status 를 보며 "받는 중 n%" 를 띄운다
 @app.post("/local_llm/prepare")
 def local_llm_prepare(body: dict):
     try:
@@ -84,32 +93,19 @@ def local_llm_status():
     return local_status
 
 
-#글자 자리만 흰색으로 (모델 없음)
-@app.post("/inpaint_normal")
-async def inpaint_normal_route(file: UploadFile, contents: str = Form(...)):
-    return png_response(inpaint_white(Image.open(io.BytesIO(await file.read())), json.loads(contents)))
-
-
 #LaMa
 @app.post("/inpaint_lama")
 async def inpaint_lama_route(file: UploadFile, contents: str = Form(...)):
     return png_response(inpaint_lama(Image.open(io.BytesIO(await file.read())), json.loads(contents)))
 
 
-# #FLUX2 (프롬프트로 지운 뒤 마스크 자리만 덮어씀). 8bit 압축본 flux2-klein-8bit/ 필요
-# #torch·diffusers 가 있는 설치에서만 된다. 여기서 늦게 import 해서 없는 빌드에서도 서버는 뜨게 한다
-# @app.post("/inpaint_flux")
-# async def inpaint_flux_route(file: UploadFile, contents: str = Form(...)):
-#     try:
-#         from Process.inpaint import inpaint_flux
-#         import torch, diffusers  # noqa: F401
-#     except ImportError:
-#         raise HTTPException(501, "FLUX is not available in this build")
-#     return png_response(inpaint_flux(Image.open(io.BytesIO(await file.read())), json.loads(contents)))
+@app.post("/sfx_render")
+async def sfx_render_route(file: UploadFile, erased: UploadFile, contents: str = Form(...)):
+    from Process.sfx_style import render_page
+    return png_response(render_page(Image.open(io.BytesIO(await file.read())), Image.open(io.BytesIO(await erased.read())), json.loads(contents)))
 
 
 #데스크톱 앱 내보내기: 프런트가 캔버스로 그린 PNG 를 폴더 경로와 함께 보내면 그 폴더에 쓴다.
-#브라우저의 폴더 쓰기 API(showDirectoryPicker)는 "127.0.0.1 이 파일을 수정하도록 허용?" 창을 띄우므로, 앱에서는 이 길로 간다
 @app.post("/export")
 async def export_file(file: UploadFile, folder: str = Form(...), name: str = Form(...)):
     folder = os.path.abspath(folder)
@@ -122,7 +118,6 @@ async def export_file(file: UploadFile, folder: str = Form(...), name: str = For
     return {"ok": True}
 
 
-
 @app.post("/api_key")
 def save_api_key(api_key:str=Form(...)):
     with open(os.path.join(ROOT, ".env"), "w", encoding="utf-8") as f:
@@ -130,16 +125,13 @@ def save_api_key(api_key:str=Form(...)):
     os.environ["GEMINI_API_KEY"] = api_key
 
 
-
-#어떤 모델이 메모리에 올라와 있는지. detect 모델(RF-DETR·OCR)은 서버 시작 때 올라오니 응답이 오면 이미 준비된 것.
-#LaMa·FLUX 는 처음 쓸 때 올라온다. 프런트가 "모델 불러오는 중" 표시에 쓴다
+#LaMa 는 처음 쓸 때 올라온다. 프런트가 "모델 불러오는 중" 표시에 쓴다
 @app.get("/models")
 def models():
     from Process import inpaint
-    return {"lama": inpaint._lama is not None, "flux": False, "flux_available": False}   # FLUX 는 주석 처리됨 (Process/inpaint.py)
+    return {"lama": inpaint._lama is not None}
 
 
-#렌더용 폰트: koharu 내장 Google Fonts 중 한글 되는 것. 파일은 /fontfiles/<상대경로> 로 그대로 내보낸다
 if os.path.isdir(FONTS_DIR):
     app.mount("/fontfiles", StaticFiles(directory=FONTS_DIR), name="fontfiles")
 
@@ -153,9 +145,6 @@ from projects import router as projects_router
 app.include_router(projects_router)
 
 
-
-
-#데스크톱 앱: 빌드된 프런트(frontend/dist)를 / 에서 직접 서빙. API 경로들 뒤에 두어야 /detect 같은 게 먼저 잡힌다
 #PyInstaller 로 묶이면 sys._MEIPASS(임시 풀림 폴더) 아래에 있다
 def resource_dir():
     import sys

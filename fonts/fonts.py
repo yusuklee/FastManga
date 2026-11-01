@@ -1,7 +1,6 @@
 import os, json, sys
 from fontTools.ttLib import TTFont
 
-#렌더용 한글 폰트. 우선순위: 환경변수 KOHARU_FONTS → 프로젝트의 fonts/ (앱에 같이 묶는 17종, Google Fonts OFL) → koharu 설치 폴더
 #fonts/index.json 이 있으면 폴더를 훑지 않고 그걸 쓴다 (앱에서는 폴더가 읽기 전용일 수 있어서)
 def _resource_dir():
     return getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,7 +19,6 @@ INDEX = os.path.join(FONTS_DIR, "index.json")
 HANGUL = 0xAC00   # '가'
 
 
-#16 = 대표 가족명 ("Noto Sans KR"), 1 = 스타일 포함 이름 ("Noto Sans KR Thin"). 16 부터 찾는다
 def family_name(font):
     names = font["name"].names
     for want in (16, 1):

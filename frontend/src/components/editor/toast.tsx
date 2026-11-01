@@ -8,9 +8,6 @@ export function describeError(e: unknown): { title: string; description: string 
   const msg = e instanceof Error ? e.message : String(e);
   const code = Number(msg.match(/^(\d{3})\b/)?.[1]);
   const body = msg.replace(/^\d{3}\s*/, "").replace(/^\{"detail":"(.*)"\}$/s, "$1");
-  if (e instanceof DOMException && e.name === "AbortError") {
-    return { title: "The translation took too long", description: "We waited 3 minutes and got no answer. Check your internet connection, or choose a faster model in Settings → Models and try again." };
-  }
   if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
     return { title: "Can't reach the app server", description: "The local server isn't running. Start it and try again." };
   }
@@ -23,7 +20,10 @@ export function describeError(e: unknown): { title: string; description: string 
   if (code === 400 && /key is required/i.test(body)) {
     return { title: "API key needed", description: "Add your Gemini API key in Settings → Models to translate." };
   }
-  if (code === 503 || code === 502) {
+  if (code === 422 && /refused/i.test(body)) {
+    return { title: "Gemini refused some text", description: "Gemini's content policy blocked part of this text. Those lines were left untranslated." };
+  }
+  if (code === 503 || (code === 502 && /overload|unavailable/i.test(body))) {
     return { title: "Translation service is busy", description: "Gemini is overloaded right now. Wait a minute and try again." };
   }
   if (code === 404 && /model/i.test(body)) {

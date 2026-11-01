@@ -4,8 +4,6 @@
 torch==2.11.0
 torchvision==0.26.0
 rfdetr==1.7.0
-manga-ocr==0.1.16
-fire
 transformers==5.16.1
 supervision==0.28.0
 huggingface_hub
@@ -20,6 +18,5 @@ uvicorn==0.40.0
 python-multipart==0.0.22
 python-dotenv==1.2.1
 google-genai==2.25.0
-jaconv==0.5.0
 pywebview==6.2.1
 requests==2.32.5

@@ -1,7 +1,6 @@
 import JSZip from "jszip";
 import { API } from "../../api";
 
-//내보내기: 코하루처럼 폴더를 고르게 하고 그 폴더에 0001_원본이름.png 로 저장한다 (File System Access API, Chrome/Edge).
 //폴더 선택을 지원하지 않는 브라우저(Firefox/Safari)면 zip 으로 내려받는다
 
 export type ExportFile = { name: string; blob: Blob };
@@ -45,7 +44,6 @@ export async function saveToFolderDesktop(folder: string, file: ExportFile) {
   if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
 }
 
-//브라우저: 폴더 선택 창. 버튼 클릭 직후에 불러야 한다 (사용자 동작이 있어야 열림). 취소하면 null, 미지원이면 undefined
 export async function pickFolder() {
   if (!window.showDirectoryPicker) return undefined;
   try {

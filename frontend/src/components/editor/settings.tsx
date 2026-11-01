@@ -5,24 +5,18 @@ import { FontPicker } from "./fontpicker";
 import type { FontChoice } from "../../Project";
 
 //설정 창 (오른쪽 아래 ⚙ SETTINGS 버튼으로 연다). 코하루처럼 왼쪽에 영역 탭, 오른쪽에 그 영역의 설정
-type InpaintModel = "inpaint_normal" | "inpaint_lama" | "inpaint_flux";
 type Lang = string; //Gemini 에 그대로 넘기는 영어 언어명
 
-//calls: 번역 API 호출 횟수. "auto" = 30페이지당 1번 (150페이지면 5번), 숫자 = 그 횟수로 문장을 나눠 보냄
-//apiKey: 사용자의 Gemini 키. 브라우저 localStorage 에만 저장되고 요청 헤더로 백엔드에 전달된다 (비어 있으면 서버 .env 키)
-//onomatopoeia: 의성어(효과음) 상자도 글자로 잡아 번역할지. RF-DETR 가 text 와 onomatopoeia 를 같이 뽑으니 포함 여부만 고른다
-//provider: 번역 API. model·apiKey 는 Gemini, gptModel·gptKey 는 ChatGPT, claudeModel·claudeKey 는 Claude,
-//openaiUrl·openaiModel·openaiKey 는 사용자가 직접 등록하는 OpenAI 방식 API (Ollama·LM Studio, Cohere, DeepSeek 등),
 //localModel 은 앱이 직접 받아 이 PC 에서 돌리는 모델 (백엔드 Process/local_llm.py)
 //키들은 설정과 따로 localStorage 에 저장한다
 export type Provider = "gemini" | "chatgpt" | "claude" | "openai" | "local";
+export type OcrModel = "paddle" | "hayai";
 export type AppSettings = {
-  source: Lang; target: Lang; inpaintModel: InpaintModel; calls: "auto" | number; onomatopoeia: boolean;
-  provider: Provider; model: string; gptModel: string; claudeModel: string; openaiUrl: string; openaiModel: string; localModel: string;
+  source: Lang; target: Lang; calls: "auto" | number; onomatopoeia: boolean; ocr: OcrModel;
+  provider: Provider; model: string; model2: string; gptModel: string; claudeModel: string; openaiUrl: string; openaiModel: string; localModel: string;
   apiKey: string; gptKey: string; claudeKey: string; openaiKey: string;
 };
 
-//Gemini 는 Gemini SDK 로 (503 이면 대체 모델). ChatGPT·Claude·OpenAI·Local 은 OpenAI 방식(/chat/completions) 으로 보낸다
 export const PROVIDERS: Record<Provider, { label: string; url: string; models: string[]; keyUrl: string }> = {
   gemini: { label: "Gemini", url: "", models: ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"], keyUrl: "https://aistudio.google.com/apikey" },
   chatgpt: { label: "ChatGPT", url: "https://api.openai.com/v1", models: ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"], keyUrl: "https://platform.openai.com/api-keys" },
@@ -37,7 +31,6 @@ const FIELDS = {
   claude: { model: "claudeModel", key: "claudeKey" },
 } as const;
 
-//Local 모델 (코하루에 있던 것). 처음 번역할 때 백엔드가 받는다. id 는 백엔드 local_llm.MODELS 와 같아야 한다
 export const LOCAL_MODELS: { id: string; name: string; size: string }[] = [
   { id: "qwen3.5-9b", name: "Qwen 3.5 9B", size: "5.7 GB" },
   { id: "qwen3.5-9b-uncensored", name: "Qwen 3.5 9B Uncensored", size: "5.6 GB" },
@@ -52,19 +45,18 @@ export const LOCAL_MODELS: { id: string; name: string; size: string }[] = [
 ];
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  source: "Japanese", target: "Korean", inpaintModel: "inpaint_lama", calls: "auto", onomatopoeia: false,
-  provider: "gemini", model: "gemini-3.6-flash", gptModel: "gpt-6-luna", claudeModel: "claude-haiku-4-5-20251001", openaiUrl: "", openaiModel: "", localModel: "gemma4-12b-it",
+  source: "Japanese", target: "Korean", calls: "auto", onomatopoeia: false, ocr: "hayai",
+  provider: "gemini", model: "gemini-3.6-flash", model2: "gemini-3.5-flash", gptModel: "gpt-6-luna", claudeModel: "claude-haiku-4-5-20251001", openaiUrl: "", openaiModel: "", localModel: "gemma4-12b-it",
   apiKey: "", gptKey: "", claudeKey: "", openaiKey: "",
 };
 
-//번역 요청에 넣을 모델·주소·키 헤더. local 이면 백엔드가 띄운 llama-server, baseUrl 도 local 도 없으면 Gemini
-export const translateTarget = (s: AppSettings): { model: string; baseUrl?: string; local?: boolean; headers: Record<string, string> } => {
+export const translateTarget = (s: AppSettings): { model: string; model2?: string; baseUrl?: string; local?: boolean; headers: Record<string, string> } => {
   const key = (k: string): Record<string, string> => (k ? { "X-Api-Key": k } : {});
   if (s.provider === "chatgpt") return { model: s.gptModel, baseUrl: PROVIDERS.chatgpt.url, headers: key(s.gptKey) };
   if (s.provider === "claude") return { model: s.claudeModel, baseUrl: PROVIDERS.claude.url, headers: key(s.claudeKey) };
   if (s.provider === "openai") return { model: s.openaiModel, baseUrl: s.openaiUrl, headers: key(s.openaiKey) };
   if (s.provider === "local") return { model: s.localModel, local: true, headers: {} };
-  return { model: s.model, headers: key(s.apiKey) };
+  return { model: s.model, model2: s.model2, headers: key(s.apiKey) };   //Gemini: model 이 실패(429·5xx)하면 model2 로
 };
 export const PAGES_PER_CALL = 30;
 const CALL_PRESETS = ["auto", 1, 2, 5] as const;
@@ -81,7 +73,6 @@ export const saveSettings = (s: AppSettings, fontFamily: string) => {
   } catch { /* 저장 못 해도 동작엔 지장 없음 */ }
 };
 
-//키 저장 이름: gemini_api_key, chatgpt_api_key, claude_api_key, openai_api_key
 export const loadKey = (p: Provider) => { try { return localStorage.getItem(`${p}_api_key`) ?? ""; } catch { return ""; } };
 const saveKey = (p: Provider, k: string) => { try { k ? localStorage.setItem(`${p}_api_key`, k) : localStorage.removeItem(`${p}_api_key`); } catch { /* 저장 못 해도 동작엔 지장 없음 */ } };
 
@@ -103,12 +94,6 @@ function EyeIcon({ off }: { off: boolean }) {
     </svg>
   );
 }
-
-const INPAINT_MODELS: { value: InpaintModel; label: string; hint: string }[] = [
-  { value: "inpaint_normal", label: "None", hint: "Fill text areas with white. Fastest." },
-  { value: "inpaint_lama", label: "LaMa", hint: "AI inpainting. Good for most pages." },
-  { value: "inpaint_flux", label: "FLUX", hint: "Diffusion inpainting. Slow, best quality." },
-];
 
 //Gemini 는 언어를 가리지 않으니 넉넉히. 값 = 표시 = 영어 이름
 const LANGS: Lang[] = [
@@ -172,7 +157,6 @@ function KeyInput({ value, placeholder, onChange }: { value: string; placeholder
 export const SettingsDialog = memo(function SettingsDialog({
   open,
   settings,
-  fluxAvailable = true,
   fonts,
   font,
   onFont,
@@ -181,7 +165,6 @@ export const SettingsDialog = memo(function SettingsDialog({
 }: {
   open: boolean;
   settings: AppSettings;
-  fluxAvailable?: boolean; //false 면 FLUX 를 목록에서 뺀다 (앱 빌드)
   fonts: FontChoice[]; //렌더 글꼴 선택지
   font: FontChoice;
   onFont: (f: FontChoice) => void;
@@ -275,9 +258,10 @@ export const SettingsDialog = memo(function SettingsDialog({
 
             {tab === "models" && (
               <>
-                <Section title="Inpainting model">
-                  <select className={`${selectCls} w-40`} value={settings.inpaintModel} onChange={(e) => set({ inpaintModel: e.target.value as InpaintModel })}>
-                    {INPAINT_MODELS.filter((m) => fluxAvailable || m.value !== "inpaint_flux").map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                <Section title="OCR model">
+                  <select className={`${selectCls} w-64`} value={settings.ocr} onChange={(e) => set({ ocr: e.target.value as OcrModel })}>
+                    <option value="paddle">PaddleOCR</option>
+                    <option value="hayai">HAYAI OCR</option>
                   </select>
                 </Section>
                 <Section title="Translation model">
@@ -321,11 +305,21 @@ export const SettingsDialog = memo(function SettingsDialog({
                             <input className={`${selectCls} w-64 min-w-0 font-mono opacity-60`} value={PROVIDERS[p].url} readOnly />
                           </Row>
                         )}
-                        <Row label="Model">
+                        <Row label={p === "gemini" ? "Main model" : "Model"}>
                           <select className={`${selectCls} w-64`} value={settings[f.model]} onChange={(e) => set({ [f.model]: e.target.value })}>
                             {PROVIDERS[p].models.map((m) => <option key={m} value={m}>{m}</option>)}
                           </select>
                         </Row>
+                        {p === "gemini" && (
+                          <Row label="Sub model">
+                            <select className={`${selectCls} w-64`} value={settings.model2} onChange={(e) => set({ model2: e.target.value })}>
+                              {PROVIDERS.gemini.models.map((m) => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                          </Row>
+                        )}
+                        {p === "gemini" && (
+                          <p className="text-[11px] text-muted-foreground">The main model is tried first on every request. If it fails (limit reached or overloaded), that request uses the sub model.</p>
+                        )}
                         <p className="mb-1 mt-3 text-[11px] font-medium text-muted-foreground">API key</p>
                         <KeyInput value={settings[f.key]} placeholder={p === "gemini" ? "AIza..." : "sk-..."} onChange={(k) => { saveKey(p, k); set({ [f.key]: k }); }} />
                         <p className="mt-1.5 text-[11px] text-muted-foreground">

@@ -22,9 +22,11 @@ MARK = os.path.join(PYLIB, ".installed")
 TMP = os.path.join(DATA, "tmp")
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 EXTRA_NO_DEPS = "simple-lama-inpainting==0.1.2"   # numpy<2 선언 때문에 의존성 검사 없이 설치 (requirements.txt 참고)
-HF_MODELS = [
-    ("mayocream/koharu-layout-rfdetr-seg-2xl-1152", ["model.safetensors"]),
-    ("kha-white/manga-ocr-base", ["*.json", "*.txt", "*.safetensors"]),
+from Process.hayai import REPO as HAYAI_REPO, REV as HAYAI_REV, PROC_REPO, PROC_REV, PATTERNS as HAYAI_PATTERNS, PROC_PATTERNS   # 가벼운 모듈(상수만)
+HF_MODELS = [   # (저장소, 받을 파일, 판. None 이면 최신)
+    ("mayocream/koharu-layout-rfdetr-seg-2xl-1152", ["model.safetensors"], None),
+    (HAYAI_REPO, HAYAI_PATTERNS, HAYAI_REV),
+    (PROC_REPO, PROC_PATTERNS, PROC_REV),
 ]
 FALLBACK_TOTAL = 3_400_000_000   # requirements.total 이 없을 때의 대략치
 INSTALL_SIZE = 5_400_000_000     # 설치가 끝났을 때 pylib 크기 (압축 해제 진행률의 분모. 2026-09 측정값)
@@ -83,7 +85,6 @@ def free_port():
 
 
 
-#pip 출력 줄에서 다운로드 진행률을 계산한다. 파일마다 "Downloading x.whl (7.0 MB)" 뒤에 "Progress X of Y" 가 이어진다
 class PipProgress:
     SIZE = re.compile(r"\((\d+(?:\.\d+)?)\s*(kB|MB|GB|bytes)\)")
     UNIT = {"bytes": 1, "kB": 1e3, "MB": 1e6, "GB": 1e9}
@@ -173,7 +174,7 @@ class Boot:
         cmd = [PYTHON, PIP, "install", "--target", PYLIB, "--upgrade", "-r", REQUIREMENTS,
                "--index-url", TORCH_INDEX, "--extra-index-url", "https://pypi.org/simple",
                "--no-warn-script-location", "--progress-bar", "raw", "--disable-pip-version-check",
-               "--no-build-isolation", "--no-cache-dir"]   # 캐시를 두면 4GB 가 pip 캐시 폴더에 또 남는다   # embeddable 파이썬은 격리 빌드 환경을 못 본다 → 동봉한 setuptools(pylib_boot) 로 빌드
+               "--no-build-isolation", "--no-cache-dir"]
         progress = PipProgress(download_total())
         self.set(phase="download", text="Downloading packages", pct=0, done=0)
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -207,7 +208,6 @@ class Boot:
                 self.set(phase="download", text="Downloading packages", pct=progress.pct, done=0)
         if p.wait() != 0:
             raise RuntimeError("Package install failed: " + "\n".join(tail[-5:]))
-        #simple-lama-inpainting 은 numpy<2 를 요구해 위 목록과 충돌한다 (numpy 2.x 로 잘 돈다) → 의존성 검사 없이 따로
         r = subprocess.run([PYTHON, PIP, "install", "--target", PYLIB, "--no-deps", "--upgrade", EXTRA_NO_DEPS,
                             "--no-warn-script-location", "--disable-pip-version-check", "--no-cache-dir", "-q"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=flags, env=env)
@@ -223,9 +223,9 @@ class Boot:
         from huggingface_hub.utils import tqdm as hf_tqdm
 
         total = 0
-        for repo, patterns in HF_MODELS:   # 받을 파일 크기 합 (진행 막대의 분모)
+        for repo, patterns, rev in HF_MODELS:   # 받을 파일 크기 합 (진행 막대의 분모)
             try:
-                for s in HfApi().model_info(repo, files_metadata=True).siblings:
+                for s in HfApi().model_info(repo, revision=rev, files_metadata=True).siblings:
                     if any(fnmatch.fnmatch(s.rfilename, pat) for pat in patterns):
                         total += s.size or 0
             except Exception:   # noqa: BLE001  크기를 못 얻으면 퍼센트 없이 진행
@@ -241,8 +241,8 @@ class Boot:
                 return super().update(n)
 
         self.set(phase="download", text="Downloading models", pct=0 if total else None, done=2)
-        for repo, patterns in HF_MODELS:
-            snapshot_download(repo, allow_patterns=patterns, tqdm_class=Progress)
+        for repo, patterns, rev in HF_MODELS:
+            snapshot_download(repo, revision=rev, allow_patterns=patterns, tqdm_class=Progress)
 
     def serve(self):
         import uvicorn
@@ -314,7 +314,7 @@ def main():
     window = webview.create_window("Manga Translator", html=loading_html(), js_api=api, width=1400, height=900, min_size=(900, 600))
     api._boot = Boot(window, free_port())
     api._boot.start()
-    webview.start()
+    webview.start(private_mode=False, storage_path=os.path.join(ROOT, "webview"))
     sys.exit(0)
 
 

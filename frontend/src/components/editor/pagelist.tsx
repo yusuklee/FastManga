@@ -12,7 +12,6 @@ function makeThumb(page: string) {
   let p = thumbCache.get(page);
   if (!p) {
     p = (async () => {
-      //createImageBitmap 은 축소 크기로 바로 디코드해서 원본(수 MB)을 메인 스레드에서 안 푼다. 안 되는 브라우저면 일반 로드
       let bmp: ImageBitmap | HTMLImageElement;
       try {
         const blob = await (await fetch(page)).blob();
@@ -82,7 +81,7 @@ const PageItem = memo(function PageItem({
       <div className="min-w-0">
         <p className="text-sm font-medium">{index + 1} page</p>
         <p className={`truncate text-[11px] ${current ? "text-accent-foreground/80" : "text-muted-foreground"}`}>
-          {count === undefined ? "—" : `${count} words`}
+          {count === undefined ? "—" : `${count} boxes`}
         </p>
       </div>
     </button>

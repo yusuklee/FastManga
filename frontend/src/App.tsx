@@ -3,7 +3,6 @@ import { Project, type Content } from "./Project";
 import { API } from "./api";
 
 //시작 화면: 위쪽 우주 띠(앱 이름) + 새 프로젝트 카드 / 프로젝트 카드 격자
-//프로젝트는 백엔드가 디스크에 저장한다 (%LOCALAPPDATA%\MangaTranslator\projects\<이름>). 앱을 껐다 켜도 목록이 남는다
 
 //백엔드 /projects 응답
 type ProjectSummary = { name: string; pages: number; done: number; updated?: number; thumb?: string | null };
@@ -37,13 +36,31 @@ function App() {
 
   const refresh = () =>
     fetch(`${API}/projects`).then(okJson).then(setProjects).catch(() => setProjects([]));
+  const [backendUp, setBackendUp] = useState(false);
   useEffect(() => {
-    refresh();
+    let timer = 0;
+    const check = async () => {
+      try {
+        setProjects(await fetch(`${API}/projects`).then(okJson));
+        setBackendUp(true);
+      } catch {
+        setBackendUp(false);
+        timer = window.setTimeout(check, 1500);
+      }
+    };
+    check();
+    return () => window.clearTimeout(timer);
   }, []);
 
-  const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
+  const fail = (e: unknown) => {
+    if (e instanceof TypeError) { //fetch 자체가 실패 = 백엔드가 꺼져 있거나 다시 켜지는 중
+      setBackendUp(false);
+      setError("Backend is not responding (starting or restarting). Wait a moment and try again.");
+      return;
+    }
+    setError(e instanceof Error ? e.message : String(e));
+  };
 
-  //"Choose a folder": 앱이면 윈도우 폴더 창 → 경로를 백엔드에 넘겨 만든다. 브라우저면 숨은 file input
   const chooseFolder = async () => {
     if (!isDesktop()) return fileRef.current?.click();
     const picked = await window.pywebview!.api.pick_folder();
@@ -139,12 +156,12 @@ function App() {
           />
           <button
             type="button"
-            disabled={!!busy}
+            disabled={!!busy || !backendUp}
             onClick={chooseFolder}
             className="mt-3 flex w-full flex-col items-center gap-1 rounded-xl border-2 border-dashed border-primary/40 bg-accent/40 px-4 py-6 text-sm transition-colors hover:border-primary hover:bg-accent disabled:opacity-60"
           >
             <span className="text-2xl">📂</span>
-            <span className="font-medium text-accent-foreground">{busy || "Choose a folder"}</span>
+            <span className="font-medium text-accent-foreground">{busy || (backendUp ? "Choose a folder" : "Starting backend... (loading models)")}</span>
             <span className="text-[11px] text-muted-foreground">Images inside become pages</span>
           </button>
           <input ref={fileRef} type="file" multiple {...{ webkitdirectory: "" }} className="hidden" onChange={handleFiles} />

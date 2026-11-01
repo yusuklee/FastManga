@@ -1,7 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { FontChoice } from "../../Project";
 
-//폰트 고르기. <select> 는 항목마다 다른 폰트로 못 그려서 직접 만든 목록. 항목마다 그 폰트로 미리보기 글자를 보여준다
 import { FONT_URL } from "../../api";
 const SAMPLE = "가나다 만화 번역 ABC";
 
@@ -22,7 +21,7 @@ export const FontPicker = memo(function FontPicker({
   fonts: FontChoice[];   //기본 폰트 포함 전체 선택지
   value: FontChoice;
   onChange: (f: FontChoice) => void;
-  inline?: boolean;      //true 면 목록을 버튼 아래에 흐르게 펼친다 (설정 창처럼 overflow 가 잘리는 곳용)
+  inline?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);

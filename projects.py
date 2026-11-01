@@ -9,7 +9,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
-from starlette.datastructures import UploadFile   # request.form() 이 주는 파일 객체는 starlette 것 (fastapi.UploadFile 로 isinstance 하면 다 걸러진다)
+from starlette.datastructures import UploadFile
 
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif")
 
@@ -145,7 +145,6 @@ def _create(name, sources):
     return detail(meta)
 
 
-#앱: 폴더 경로로 만들기. body {"name": "...", "folder": "C:\\..."} (이름이 비면 폴더 이름)
 @router.post("/from_folder")
 def create_from_folder(body: dict):
     folder = os.path.abspath(body["folder"])
@@ -180,7 +179,6 @@ def get_project(name: str):
     return detail(load_meta(project_dir(name)))
 
 
-#작업 결과 저장: body {"contents": {file: [Content...]}}. 페이지별 글자 상자·번역문 전체를 덮어쓴다
 @router.put("/{name}/state")
 def put_state(name: str, body: dict):
     d = project_dir(name)
@@ -235,8 +233,6 @@ def get_file(name: str, kind: str, file: str):
     path = os.path.join(project_dir(name), kind, file)
     if not os.path.isfile(path):
         raise HTTPException(404, "file not found")
-    #CORS 헤더를 항상 붙인다. 개발 중(프런트 5173, 서버 8000)엔 <img> 가 먼저 받아 캐시된 응답에 이 헤더가 없어서,
-    #같은 파일을 fetch() 로 다시 받는 썸네일이 캐시에서 "Failed to fetch" 로 실패했다 (현재 페이지인 1페이지만 그랬던 이유)
     return FileResponse(path, headers={"Access-Control-Allow-Origin": "*"})
 
 

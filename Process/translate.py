@@ -71,10 +71,12 @@ def get_client(api_key=None):
     return _clients[key]
 
 
-JAPANESE = re.compile(r"[ぁ-んァ-ヶ一-龯]")   # 가나·한자가 번역문에 남았는지 검사용
+#Gemini 가 내용 정책으로 거절함 (빈 답이 온다)
+class Blocked(Exception):
+    code = 422
 
-#설정 창에 보여줄 모델 목록: API 에서 받아 텍스트 모델만 남긴다 (image/tts/transcribe 등 제외). 한 번 받으면 캐시
-MODEL = os.environ.get("TRANSLATE_MODEL", "gemini-3.6-flash")          # 바로 번역, 검토 없음                                                     # None = 모델 기본 생각 수준(보통). "minimal" 은 빨랐지만 번역이 거칠고, 지원 안 하는 모델도 있다
+
+MODEL = os.environ.get("TRANSLATE_MODEL", "gemini-3.6-flash")          # 프런트가 모델을 안 보냈을 때만 쓰는 기본값
 FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite"]        # 503(과부하)·429(일일 한도)면 순서대로 대체
 
 #JSON 이 깨져 오면 (작은 모델) {"id": N, "text": "..."} 조각만 골라 읽는다
@@ -91,16 +93,14 @@ JSON_SCHEMA = {"type": "object", "required": ["translations"], "properties": {"t
     "type": "object", "required": ["id", "text"], "properties": {"id": {"type": "integer"}, "text": {"type": "string"}}}}}}
 
 
-
-
-
-def ask(base_url, model, system, payload, api_key=None, local=False, thinking = None): #req 보내고 응답받기
+def ask(base_url, model, system, payload, api_key=None, local=False, thinking = None, model2=None): #req 보내고 응답받기
 
 
     start=time.time()
     if not base_url:     #when gen api
         client = get_client(api_key)
-        candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
+        #model2(설정의 Model 2)가 오면 model → model2. 매 요청마다 model 부터 다시 시도한다
+        candidates = [model] + ([model2] if model2 and model2 != model else []) if model2 else [model] + [m for m in FALLBACK_MODELS if m != model]
         last = None
         n = len(payload.get("segments", []))
         for m in candidates:
@@ -116,16 +116,20 @@ def ask(base_url, model, system, payload, api_key=None, local=False, thinking = 
                         thinking_config=types.ThinkingConfig(thinking_level=thinking) if thinking else None,
                     ),
                 )
-
-                print(f"{m} model 로 대체 되었습니다. " if m!=model else f"{m} 정상 작동")
-                return parse_translations(resp.text)
+                if resp.text is None:
+                    reason = getattr(resp.prompt_feedback, "block_reason", None) or (resp.candidates[0].finish_reason if resp.candidates else None)
+                    print(f"{m} 거절됨 {reason} ({n}줄)", flush=True)
+                    raise Blocked(f"Gemini refused this text ({reason})")
+                out = parse_loose(resp.text)
+                print(f"{m} model 로 대체 되었습니다. " if m!=model else f"{m} 정상 작동", f"{len(out)}/{n}줄 {time.time() - start:.1f}s", flush=True)
+                return out
 
             except errors.APIError as e:
                 last = e
 
-                print(f"{m} model 에러 발생", flush=True)
-                if e.code == 429:
-                    break
+                print(f"{m} model 에러 발생 {e.code}", flush=True)
+                if e.code == 429:   # 한도 → 다음 모델로
+                    continue
                 if e.code == 400 and thinking and "thinking" in str(
                     e.message).lower():  # 이 모델이 그 생각 수준을 안 받음 → 기본값으로 다시
                     thinking = None
@@ -160,17 +164,12 @@ def ask(base_url, model, system, payload, api_key=None, local=False, thinking = 
         return parse_loose(text)
 
 
-
-
-
-
 LLAMA_ZIP_URL = "https://github.com/ggml-org/llama.cpp/releases/download/b11195/llama-b11195-bin-win-vulkan-x64.zip"
 LLAMA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "llama")
 GGUF_DIR = os.path.join(os.environ.get("HF_HOME") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface"), "gguf")
 LLAMA_PORT = 8790
 LLAMA_CONTEXT = 16384   # 요청 하나에 들어갈 토큰 수 (문장 + 번역문). -np 1 이라 요청은 줄 서서 하나씩
 
-#이 PC 의 코하루가 받아 둔 Qwen·VNTL 5개 + 코하루 목록의 Gemma 4 5개. id: (HF 저장소, 파일). 프런트 LOCAL_MODELS 와 id 가 같아야 한다
 LOCAL_MODELS = {
     "qwen3.5-9b": ("unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q4_K_M.gguf"),
     "qwen3.5-9b-uncensored": ("HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive", "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf"),
@@ -184,29 +183,36 @@ LOCAL_MODELS = {
     "gemma4-31b-it": ("unsloth/gemma-4-31B-it-qat-GGUF", "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf"),
 }
 
+def kill_port(port):
+    out = subprocess.run(["netstat", "-ano"], capture_output=True).stdout.decode("ascii", "ignore")
+    for line in out.splitlines():
+        if f":{port} " in line and "LISTENING" in line:
+            pid = line.split()[-1]
+            if pid.isdigit() and int(pid) != os.getpid():
+                subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True)
+
+
 local_status = {"state": "idle", "text": "", "done": 0, "total": 0}   # idle / downloading / starting / ready / error. 프런트가 진행 표시에 씀
 _llama_proc = None
 _llama_model = None
 _llama_lock = threading.Lock()
 
 
-
-
-def download(url, path, label):
+def download(url, path, label, status=None):
+    status = local_status if status is None else status
     if os.path.exists(path):
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with requests.get(url, stream=True, timeout=30) as r:
         r.raise_for_status()
-        local_status.update(state="downloading", text=label, done=0, total=int(r.headers.get("content-length", 0)))
+        status.update(state="downloading", text=label, done=0, total=int(r.headers.get("content-length", 0)))
         with open(path + ".part", "wb") as f:
             for chunk in r.iter_content(1 << 20):
                 f.write(chunk)
-                local_status["done"] += len(chunk)
+                status["done"] += len(chunk)
     os.replace(path + ".part", path)
 
 
-#zip 에서 llama-server 에 필요한 것만 푼다 (llama-cli·bench·quantize 등 도구 exe 20개와 그 dll 은 안 씀)
 #ggml-cpu-*.dll 은 CPU 종류별이라 전부 둔다 (실행할 때 이 PC CPU 에 맞는 것 하나를 고름)
 LLAMA_KEEP = re.compile(r"^(llama-server\.exe|llama-server-impl\.dll|llama-common\.dll|llama\.dll|mtmd\.dll|ggml.*\.dll|libomp\.dll|LICENSE.*)$")
 
@@ -227,6 +233,7 @@ def local_stop():
         _llama_proc.terminate()
         _llama_proc.wait(10)
     _llama_proc = _llama_model = None
+    kill_port(LLAMA_PORT)
 
 atexit.register(local_stop)
 
@@ -235,7 +242,6 @@ def local_running(model_id):
     return _llama_model == model_id and _llama_proc is not None and _llama_proc.poll() is None
 
 
-#그 모델로 llama-server 가 떠 있게 한다 (없으면 받고, 다른 모델이 떠 있으면 바꾼다). 이미 떠 있으면 바로 주소를 돌려줌
 def local_ensure(model_id):
     global _llama_proc, _llama_model
     with _llama_lock:
@@ -246,10 +252,9 @@ def local_ensure(model_id):
             exe = llama_exe()
             path = os.path.join(GGUF_DIR, file)
             download(f"https://huggingface.co/{repo}/resolve/main/{file}", path, file)
-            local_stop()
+            local_stop()   # 이전 서버(고아 포함) 정리
             local_status.update(state="starting", text=model_id, done=0, total=0)
             log = open(os.path.join(LLAMA_DIR, "server.log"), "w", encoding="utf-8")
-            #GPU 에 올릴 양은 llama-server 가 VRAM 에 맞춰 정한다 (--fit 기본 on, 넘치면 일부는 RAM). --reasoning-budget 0: 생각 끄기 (번역엔 느리기만 함)
             _llama_proc = subprocess.Popen([exe, "-m", path, "--host", "127.0.0.1", "--port", str(LLAMA_PORT), "-c", str(LLAMA_CONTEXT), "-np", "1",
                                             "--reasoning-budget", "0"], stdout=log, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
             t = time.time()
@@ -283,7 +288,7 @@ def local_prepare(model_id):
     threading.Thread(target=lambda: local_ensure(model_id), daemon=True).start()
 
 
-def req(lines, source="Japanese", target="Korean", model=None, api_key=None, base_url=None, local=False):
+def req(lines, source="Japanese", target="Korean", model=None, api_key=None, base_url=None, local=False, model2=None):
     payload = {
         "source_language": source,
         "target_language": target,
@@ -296,18 +301,31 @@ def req(lines, source="Japanese", target="Korean", model=None, api_key=None, bas
     if base_url:       #제미나이외에 다른 open ai gpt, 클로드 등등
         return ask(base_url, model, system, payload, api_key=api_key)
     #제미나이
-    return ask(None,model or MODEL, system, payload, api_key=api_key)
+    return ask_split(model or MODEL, system, payload, api_key, model2)
 
 
+#거절된 묶음만 반씩 나눠 다시 보낸다 (3 번까지). 끝까지 거절되는 줄은 원문 그대로
+MAX_SPLIT = 3
+def ask_split(model, system, payload, api_key, model2, depth=0):
+    try:
+        return ask(None, model, system, payload, api_key=api_key, model2=model2)
+    except Blocked:
+        segs = payload["segments"]
+        if len(segs) < 2 or depth >= MAX_SPLIT:
+            print(f"[translate] 거절된 {len(segs)}줄은 원문 그대로 둠", flush=True)
+            return {}
+        half = len(segs) // 2
+        out = {}
+        for part in (segs[:half], segs[half:]):
+            out.update(ask_split(model, system, {**payload, "segments": part}, api_key, model2, depth + 1))
+        return out
 
 
-
-def req_and_fill_res(lines, source="Japanese", target="Korean", model=None, api_key=None, base_url=None, local=False):
-    out = req(lines, source, target, model, api_key, base_url, local)
+def req_and_fill_res(lines, source="Japanese", target="Korean", model=None, api_key=None, base_url=None, local=False, model2=None):
+    out = req(lines, source, target, model, api_key, base_url, local, model2)
     missing = [t for t in lines if not out.get(t["id"],"").strip()]
     for t in missing:
         out[t["id"]] = t["word"]
     return out
-
 
 
