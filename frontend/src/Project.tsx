@@ -201,7 +201,8 @@ export function Project({
     const provider = saved.provider && saved.provider in PROVIDERS ? saved.provider : "gemini";
     const localModel = LOCAL_MODELS.some((m) => m.id === saved.localModel) ? saved.localModel! : DEFAULT_SETTINGS.localModel;
     const ocr = saved.ocr === "paddle" ? "paddle" : "hayai";
-    return { ...DEFAULT_SETTINGS, ...saved, provider, localModel, ocr, apiKey: loadKey("gemini"), gptKey: loadKey("chatgpt"), claudeKey: loadKey("claude"), openaiKey: loadKey("openai") };
+    const claudeModel = PROVIDERS.claude.models.includes(saved.claudeModel ?? "") ? saved.claudeModel! : DEFAULT_SETTINGS.claudeModel;
+    return { ...DEFAULT_SETTINGS, ...saved, provider, localModel, ocr, claudeModel, apiKey: loadKey("gemini"), gptKey: loadKey("chatgpt"), claudeKey: loadKey("claude"), openaiKey: loadKey("openai") };
   });
   const target = translateTarget(settings);
   const modelName = target.model || settings.provider;
@@ -211,7 +212,7 @@ export function Project({
     const r = await fetch(`${API}/translate`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...target.headers },
-      body: JSON.stringify({ lines, source: settings.source, target: settings.target, model: target.model, ...(target.model2 ? { model2: target.model2 } : {}), ...(target.baseUrl !== undefined ? { base_url: target.baseUrl } : {}), ...(target.local ? { local: true } : {}) }),
+      body: JSON.stringify({ lines, source: settings.source, target: settings.target, model: target.model, ...(target.model2 ? { model2: target.model2 } : {}), ...(target.baseUrl !== undefined ? { base_url: target.baseUrl } : {}), ...(target.local ? { local: true } : {}), ...(target.provider ? { provider: target.provider, effort: target.effort } : {}) }),
     });
     return await okJson(r);
   };
@@ -264,17 +265,17 @@ export function Project({
     if (f) set_font(f);
   }, [fontChoices]);
 
-  //백엔드가 뜰 때까지(=detect 모델 로드 끝날 때까지) 2초마다 확인하며 안내 문구를 띄운다
+  //백엔드가 뜰 때까지 2초마다 확인하며 안내 문구를 띄운다
   const [backendUp, setBackendUp] = useState(false);
   useEffect(() => {
     let timer: number | undefined;
     const check = async () => {
       try {
-        await fetch(`${API}/models`).then(okJson);
+        await fetch(`${API}/setup/status`).then(okJson);
         setBackendUp(true);
-        setProgress((p) => (p.startsWith("Loading backend") ? "" : p));
+        setProgress((p) => (p.startsWith("Starting backend") ? "" : p));
       } catch {
-        setProgress("Loading backend models... (DETECT · OCR)");
+        setProgress("Starting backend...");
         timer = window.setTimeout(check, 2000);
       }
     };
@@ -282,15 +283,18 @@ export function Project({
     return () => window.clearTimeout(timer);
   }, []);
 
-  //LaMa 는 처음 쓸 때 서버가 올린다. 아직 안 올라왔으면 "불러오는 중" 을 보여주고 요청한다
-  const MODEL_LABEL: Record<string, { key: "lama"; name: string }> = {
-    inpaint_lama: { key: "lama", name: "LaMa" },
-  };
-  const noteModelLoading = async (inpaint_model: string) => {
-    const m = MODEL_LABEL[inpaint_model];
-    if (!m) return;
-    const loaded: Record<string, boolean> = await fetch(`${API}/models`).then(okJson).catch(() => ({}));
-    if (!loaded[m.key]) setProgress(`Loading ${m.name} model... (first time only)`);
+  //처음 PROCESS 할 때 백엔드가 AI 패키지·모델을 받는다. 끝날 때까지 준비 창을 띄운다
+  type SetupState = { state: string; text: string; pct: number | null };
+  const [setup, setSetup] = useState<SetupState | null>(null);
+  const prepareModels = async () => {
+    let s: SetupState = await fetch(`${API}/setup/prepare`, { method: "POST" }).then(okJson);
+    while (s.state !== "ready") {
+      setSetup(s);
+      if (s.state === "error") throw new Error(`Model setup: ${s.text}`);
+      await new Promise((r) => setTimeout(r, 1000));
+      s = await fetch(`${API}/setup/status`).then(okJson);
+    }
+    setSetup(null);
   };
 
   useEffect(() => {
@@ -398,7 +402,7 @@ const handle_translate_pages = async (targets: string[]) => {
 const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!, target?:Content[], base?:string)=>{
     const contents = target ?? pageContents[page];
     if (!contents || !contents.length)return;
-    await noteModelLoading(inpaint_model);
+    await prepareModels();
     const image = await post_inpaint(inpaint_model,page,contents,base);
     setInpaintedImgs((prev)=>{
         if (prev[page]?.startsWith("blob:")) URL.revokeObjectURL(prev[page]);
@@ -412,7 +416,7 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
     const key = erased && targets.length ? `${erased}|${targets.map((c) => `${c.id}:${c.translated}:${c.pos.join(",")}`).join("|")}` : "";
     if (sfxKeys.current[page] === key) return;
     sfxKeys.current[page] = key;
-    const image = key ? await post_sfx(page, erased!, contents!).catch((e) => { setProgress(`SFX render error: ${(e as Error).message}`); return undefined; }) : undefined;
+    const image = key ? await prepareModels().then(() => post_sfx(page, erased!, contents!)).catch((e) => { setProgress(`SFX render error: ${(e as Error).message}`); return undefined; }) : undefined;
     if (sfxKeys.current[page] !== key) return; //그 사이 조건이 바뀌었으면 버린다
     setSfxImgs((prev) => {
       if (prev[page]?.startsWith("blob:")) URL.revokeObjectURL(prev[page]);
@@ -423,6 +427,7 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
   };
   const handle_all = async (targets:string[]=pages)=>{
     const gid = (pageIndex:number, id:number)=> pageIndex*10000+id;
+    await prepareModels();
     await prepareOcr();
     await prepareLocal();
     const per = settings.calls === "auto" ? PAGES_PER_CALL : Math.ceil(targets.length / settings.calls);
@@ -605,6 +610,7 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
   //단계 하나만 선택한 페이지 전부에 실행
   const run_step = async (step: "detect" | "ocr" | "translate" | "inpaint") => {
     const label = { detect: "DETECT", ocr: "OCR", translate: "TRANSLATE", inpaint: "INPAINT" }[step];
+    if (step !== "translate") await prepareModels();
     if (step === "ocr") await prepareOcr();
     if (step === "translate") await handle_translate_pages(targetPages);
     else for (const [i, page] of targetPages.entries()) {
@@ -821,6 +827,22 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
       />
 
       <Toasts items={toasts} onClose={closeToast} />
+
+      {setup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-[440px] rounded-lg border bg-background p-6 shadow-xl">
+            <div className="text-sm font-medium">{setup.state === "error" ? "Model setup failed" : "Preparing AI models"}</div>
+            <div className="mt-2 text-sm text-muted-foreground">{setup.text}{setup.pct !== null && setup.state !== "error" ? `  ${setup.pct}%` : ""}</div>
+            {setup.state !== "error" && (
+              <div className="mt-3 h-2 w-full overflow-hidden rounded bg-muted">
+                <div className={`h-full bg-primary transition-all ${setup.pct === null ? "w-1/3 animate-pulse" : ""}`} style={setup.pct === null ? undefined : { width: `${setup.pct}%` }} />
+              </div>
+            )}
+            <div className="mt-2 text-[11px] text-muted-foreground">First time only. Downloads the detection and OCR models (about 0.8 GB).</div>
+            {setup.state === "error" && <Button className="mt-3" size="sm" onClick={() => setSetup(null)}>Close</Button>}
+          </div>
+        </div>
+      )}
 
       {/* 하단 상태 줄 */}
       <footer className="flex h-7 shrink-0 items-center gap-3 border-t bg-background px-3 text-[11px] text-muted-foreground">

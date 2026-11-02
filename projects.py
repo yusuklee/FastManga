@@ -16,7 +16,7 @@ IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif")
 
 def projects_root():
     root = os.environ.get("MANGA_PROJECTS_DIR") or os.path.join(
-        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "MangaTranslator", "projects"
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "FastManga", "projects"
     )
     os.makedirs(root, exist_ok=True)
     return root

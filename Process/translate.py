@@ -76,8 +76,47 @@ class Blocked(Exception):
     code = 422
 
 
+#Claude (anthropic SDK). 거절은 정상 응답에 stop_reason="refusal" 로 온다
+def ask_claude(model, system, payload, api_key=None, effort="medium"):
+    import anthropic
+    key = (api_key or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        raise ValueError("Claude API key is required. Enter it in Settings -> API key.")
+    if ("claude", key) not in _clients:
+        _clients[("claude", key)] = anthropic.Anthropic(api_key=key, max_retries=5)
+    client = _clients[("claude", key)]
+    n = len(payload.get("segments", []))
+    start = time.time()
+    try:
+        with client.messages.stream(model=model, max_tokens=64000, system=system, output_config={"effort": effort},
+                                    messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]) as s:
+            r = s.get_final_message()
+    except anthropic.APIStatusError as e:
+        print(f"{model} 에러 {e.status_code}", flush=True)
+        raise errors.APIError(e.status_code, {"error": {"message": f"Claude: {e.message}"[:300]}})
+    except anthropic.APIConnectionError as e:
+        raise errors.APIError(502, {"error": {"message": f"Claude: cannot connect ({e})"}})
+    if r.stop_reason == "refusal":
+        reason = getattr(r.stop_details, "category", None)
+        print(f"{model} 거절됨 {reason} ({n}줄)", flush=True)
+        raise Blocked(f"Claude refused this text ({reason})")
+    out = parse_loose("".join(b.text for b in r.content if b.type == "text"))
+    print(f"{model} {len(out)}/{n}줄 {time.time() - start:.1f}s (effort {effort})", flush=True)
+    return out
+
+
 MODEL = os.environ.get("TRANSLATE_MODEL", "gemini-3.6-flash")          # 프런트가 모델을 안 보냈을 때만 쓰는 기본값
 FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite"]        # 503(과부하)·429(일일 한도)면 순서대로 대체
+
+#429 응답에서 기다릴 시간(초). 하루 한도(PerDay)면 None
+QUOTA_ID = re.compile(r"'quotaId':\s*'([^']+)'")
+RETRY_DELAY = re.compile(r"'retryDelay':\s*'(\d+(?:\.\d+)?)s'")
+def retry_delay(text):
+    if "PerDay" in text:
+        return None
+    m = RETRY_DELAY.search(text)
+    return min(float(m.group(1)), 90) + 1 if m else 20.0
+
 
 #JSON 이 깨져 오면 (작은 모델) {"id": N, "text": "..."} 조각만 골라 읽는다
 PAIR = re.compile(r'\{\s*"id"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*("(?:[^"\\]|\\.)*")')
@@ -103,7 +142,9 @@ def ask(base_url, model, system, payload, api_key=None, local=False, thinking = 
         candidates = [model] + ([model2] if model2 and model2 != model else []) if model2 else [model] + [m for m in FALLBACK_MODELS if m != model]
         last = None
         n = len(payload.get("segments", []))
-        for m in candidates:
+        queue, waits, daily = list(candidates), {}, False
+        while queue:
+            m = queue.pop(0)
             try:
 
                 resp = client.models.generate_content(
@@ -126,9 +167,18 @@ def ask(base_url, model, system, payload, api_key=None, local=False, thinking = 
 
             except errors.APIError as e:
                 last = e
-
-                print(f"{m} model 에러 발생 {e.code}", flush=True)
-                if e.code == 429:   # 한도 → 다음 모델로
+                text = str(e)
+                print(f"{m} model 에러 발생 {e.code} {QUOTA_ID.findall(text) or e.message[:120]}", flush=True)
+                if e.code == 429:
+                    #분당 한도면 API 가 알려준 시간만큼 기다렸다가 같은 모델로 다시 (3번까지). 하루 한도면 다음 모델로
+                    d = retry_delay(text)
+                    if d is None:
+                        daily = True
+                    elif waits.get(m, 0) < 3:
+                        waits[m] = waits.get(m, 0) + 1
+                        print(f"{m} {d:.0f}초 뒤 다시", flush=True)
+                        time.sleep(d)
+                        queue.insert(0, m)
                     continue
                 if e.code == 400 and thinking and "thinking" in str(
                     e.message).lower():  # 이 모델이 그 생각 수준을 안 받음 → 기본값으로 다시
@@ -139,8 +189,9 @@ def ask(base_url, model, system, payload, api_key=None, local=False, thinking = 
 
 
         if isinstance(last, errors.APIError) and last.code == 429:
+            kind = "daily quota" if daily else "per-minute rate limit"
             raise errors.APIError(429, {
-                "error": {"message": f"quota exceeded for {', '.join(candidates)}", "status": "RESOURCE_EXHAUSTED"}})
+                "error": {"message": f"{kind} exceeded for {', '.join(candidates)}", "status": "RESOURCE_EXHAUSTED"}})
         raise last
 
     else:   #others
@@ -288,7 +339,7 @@ def local_prepare(model_id):
     threading.Thread(target=lambda: local_ensure(model_id), daemon=True).start()
 
 
-def req(lines, source="Japanese", target="Korean", model=None, api_key=None, base_url=None, local=False, model2=None):
+def req(lines, source="Japanese", target="Korean", model=None, api_key=None, base_url=None, local=False, model2=None, provider=None, effort="medium"):
     payload = {
         "source_language": source,
         "target_language": target,
@@ -298,17 +349,19 @@ def req(lines, source="Japanese", target="Korean", model=None, api_key=None, bas
     system = PROMPT.format(source=source, target=target)
     if local:  # local
         return ask(local_ensure(model), model, system, payload, local=True)
-    if base_url:       #제미나이외에 다른 open ai gpt, 클로드 등등
+    if provider == "claude":
+        return ask_split(lambda p: ask_claude(model, system, p, api_key, effort), payload)
+    if base_url:       #open ai gpt 등 OpenAI 호환
         return ask(base_url, model, system, payload, api_key=api_key)
     #제미나이
-    return ask_split(model or MODEL, system, payload, api_key, model2)
+    return ask_split(lambda p: ask(None, model or MODEL, system, p, api_key=api_key, model2=model2), payload)
 
 
 #거절된 묶음만 반씩 나눠 다시 보낸다 (3 번까지). 끝까지 거절되는 줄은 원문 그대로
 MAX_SPLIT = 3
-def ask_split(model, system, payload, api_key, model2, depth=0):
+def ask_split(fn, payload, depth=0):
     try:
-        return ask(None, model, system, payload, api_key=api_key, model2=model2)
+        return fn(payload)
     except Blocked:
         segs = payload["segments"]
         if len(segs) < 2 or depth >= MAX_SPLIT:
@@ -317,12 +370,12 @@ def ask_split(model, system, payload, api_key, model2, depth=0):
         half = len(segs) // 2
         out = {}
         for part in (segs[:half], segs[half:]):
-            out.update(ask_split(model, system, {**payload, "segments": part}, api_key, model2, depth + 1))
+            out.update(ask_split(fn, {**payload, "segments": part}, depth + 1))
         return out
 
 
-def req_and_fill_res(lines, source="Japanese", target="Korean", model=None, api_key=None, base_url=None, local=False, model2=None):
-    out = req(lines, source, target, model, api_key, base_url, local, model2)
+def req_and_fill_res(lines, source="Japanese", target="Korean", model=None, **kw):
+    out = req(lines, source, target, model, **kw)
     missing = [t for t in lines if not out.get(t["id"],"").strip()]
     for t in missing:
         out[t["id"]] = t["word"]

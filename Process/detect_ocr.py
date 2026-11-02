@@ -356,6 +356,7 @@ def glyph_size(ink, box):
 
 
 #길쭉하지 않은 덩어리·세로 줄은 빼고, 3도 미만은 0 (멀쩡한 대사가 삐뚤어지지 않게)
+#기울기는 줄의 아래 가장자리(밑선)로 잰다: 위에 붙은 후리가나에 안 끌리게
 def text_angle(line_map, mask, box):
     x1, y1, x2, y2 = box
     comp = (line_map[y1:y2, x1:x2] >= LINE_THRESHOLD).astype(np.uint8)
@@ -376,6 +377,12 @@ def text_angle(line_map, mask, box):
         a = a - 180 if a > 90 else a + 180 if a <= -90 else a
         if abs(a) > 45:   # 세로 줄
             continue
+        cols = np.unique(xs)
+        if len(cols) < 20:
+            continue
+        bottom = np.array([ys[xs == c].max() for c in cols], np.float32)
+        step = max(1, len(cols) // 3)
+        a = float(np.degrees(np.arctan(np.median((bottom[step:] - bottom[:-step]) / (cols[step:] - cols[:-step])))))
         angles.append(a)
         weights.append(len(xs))
     if not angles:

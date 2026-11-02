@@ -3,15 +3,52 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 import io, os, json
-from Process.detect_ocr import detect_boxes, ocr_boxes, paddle_prepare, paddle_status
+from Process import setup
 from Process.translate import req_and_fill_res, local_prepare, local_status
-from Process.inpaint import inpaint_lama
 from fonts.fonts import list_korean_fonts, FONTS_DIR
 from google.genai import errors as genai_errors
-ROOT = os.path.dirname(__file__)
+ROOT = os.path.dirname(os.path.abspath(__file__))
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+#AI 패키지·모델은 처음 PROCESS 할 때 받는다. 그 전엔 탐지·OCR·지우기 라우트가 409 를 돌려준다
+@app.post("/setup/prepare")
+def setup_prepare():
+    setup.prepare()
+    return setup.status
+
+
+@app.get("/setup/status")
+def setup_status():
+    return setup.status
+
+
+#자동 업데이트 (Process/update.py)
+@app.get("/update/check")
+def update_check():
+    from Process import update
+    return update.check()
+
+
+@app.post("/update/install")
+def update_install():
+    from Process import update
+    return update.install()
+
+
+@app.get("/update/status")
+def update_status():
+    from Process import update
+    return update.status
+
+
+def models():
+    if not setup.ready():
+        raise HTTPException(409, "AI models are not installed yet")
+    from Process import detect_ocr, inpaint
+    return detect_ocr, inpaint
 
 
 #인페인팅 결과는 PNG 바이트 그대로 보낸다 (base64 JSON 보다 1/3 작고, 프런트가 디코드할 필요 없음)
@@ -24,23 +61,24 @@ def png_response(out):
 @app.post("/detect")
 async def detect(file: UploadFile, classes: str = Form("text")):
     wanted = tuple(c.strip() for c in classes.split(",") if c.strip()) or ("text",)
-    return detect_boxes(Image.open(io.BytesIO(await file.read())), wanted)
+    return models()[0].detect_boxes(Image.open(io.BytesIO(await file.read())), wanted)
 
 
 @app.post("/ocr")
 async def ocr_route(file: UploadFile, contents: str = Form(...), ocr: str = Form("hayai")):
-    return ocr_boxes(Image.open(io.BytesIO(await file.read())), json.loads(contents), ocr)
+    return models()[0].ocr_boxes(Image.open(io.BytesIO(await file.read())), json.loads(contents), ocr)
 
 
 @app.post("/paddle_ocr/prepare")
 def paddle_ocr_prepare():
-    paddle_prepare()
-    return paddle_status
+    d = models()[0]
+    d.paddle_prepare()
+    return d.paddle_status
 
 
 @app.get("/paddle_ocr/status")
 def paddle_ocr_status():
-    return paddle_status
+    return models()[0].paddle_status
 
 
 @app.post("/translate")
@@ -57,6 +95,14 @@ def translate(body: dict, api_key: str | None = Header(default=None, alias="X-Ap
         except Exception as e:
             c = getattr(e, "code", None)
             raise HTTPException(c if 400 <= (c or 0) <600 else 502, str(e))
+
+    elif body.get("provider") == "claude":
+        try:
+            return req_and_fill_res(body["lines"], body.get("source", None), body.get("target", "English"),
+                                    body.get("model"), api_key=api_key, provider="claude", effort=body.get("effort", "medium"))
+        except Exception as e:
+            c = getattr(e, "code", None)
+            raise HTTPException(c if 400 <= (c or 0) < 600 else 502, str(e))
 
     elif base_url:
         try:
@@ -93,14 +139,14 @@ def local_llm_status():
     return local_status
 
 
-#LaMa
 @app.post("/inpaint_lama")
 async def inpaint_lama_route(file: UploadFile, contents: str = Form(...)):
-    return png_response(inpaint_lama(Image.open(io.BytesIO(await file.read())), json.loads(contents)))
+    return png_response(models()[1].inpaint_lama(Image.open(io.BytesIO(await file.read())), json.loads(contents)))
 
 
 @app.post("/sfx_render")
 async def sfx_render_route(file: UploadFile, erased: UploadFile, contents: str = Form(...)):
+    models()
     from Process.sfx_style import render_page
     return png_response(render_page(Image.open(io.BytesIO(await file.read())), Image.open(io.BytesIO(await erased.read())), json.loads(contents)))
 
@@ -125,13 +171,6 @@ def save_api_key(api_key:str=Form(...)):
     os.environ["GEMINI_API_KEY"] = api_key
 
 
-#LaMa 는 처음 쓸 때 올라온다. 프런트가 "모델 불러오는 중" 표시에 쓴다
-@app.get("/models")
-def models():
-    from Process import inpaint
-    return {"lama": inpaint._lama is not None}
-
-
 if os.path.isdir(FONTS_DIR):
     app.mount("/fontfiles", StaticFiles(directory=FONTS_DIR), name="fontfiles")
 
@@ -145,11 +184,6 @@ from projects import router as projects_router
 app.include_router(projects_router)
 
 
-#PyInstaller 로 묶이면 sys._MEIPASS(임시 풀림 폴더) 아래에 있다
-def resource_dir():
-    import sys
-    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-
-FRONTEND_DIST = os.path.join(resource_dir(), "frontend", "dist")
+FRONTEND_DIST = os.path.join(ROOT, "frontend", "dist")
 if os.path.isdir(FRONTEND_DIST):
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

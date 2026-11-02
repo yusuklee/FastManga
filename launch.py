@@ -1,35 +1,14 @@
-
-import fnmatch
-import hashlib
+#배포본 실행 파일. 첫 실행이면 기본 패키지를 받고, 백엔드를 띄운 뒤 창에 연다. AI 패키지·모델은 앱 안에서 처음 PROCESS 할 때 받는다
 import os
-import re
-import shutil
 import socket
-import subprocess
 import sys
 import threading
 import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-PYTHON = os.path.join(ROOT, "python", "python.exe")
-PIP = os.path.join(ROOT, "pip.pyz")
-REQUIREMENTS = os.path.join(ROOT, "requirements.txt")
-REQUIREMENTS_TOTAL = os.path.join(ROOT, "requirements.total")   # build/build.py 가 잰 첫 실행 다운로드 총 바이트
 DATA = os.environ.get("MANGA_DATA_DIR") or ROOT
 PYLIB = os.path.join(DATA, "pylib")
-MARK = os.path.join(PYLIB, ".installed")
-TMP = os.path.join(DATA, "tmp")
-TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
-EXTRA_NO_DEPS = "simple-lama-inpainting==0.1.2"   # numpy<2 선언 때문에 의존성 검사 없이 설치 (requirements.txt 참고)
-from Process.hayai import REPO as HAYAI_REPO, REV as HAYAI_REV, PROC_REPO, PROC_REV, PATTERNS as HAYAI_PATTERNS, PROC_PATTERNS   # 가벼운 모듈(상수만)
-HF_MODELS = [   # (저장소, 받을 파일, 판. None 이면 최신)
-    ("mayocream/koharu-layout-rfdetr-seg-2xl-1152", ["model.safetensors"], None),
-    (HAYAI_REPO, HAYAI_PATTERNS, HAYAI_REV),
-    (PROC_REPO, PROC_PATTERNS, PROC_REV),
-]
-FALLBACK_TOTAL = 3_400_000_000   # requirements.total 이 없을 때의 대략치
-INSTALL_SIZE = 5_400_000_000     # 설치가 끝났을 때 pylib 크기 (압축 해제 진행률의 분모. 2026-09 측정값)
 
 
 def setup_env():
@@ -43,37 +22,9 @@ def setup_env():
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     os.environ.setdefault("LAMA_MODEL", os.path.join(ROOT, "anime-manga-big-lama.pt"))
     os.environ.setdefault("CTD_MODEL", os.path.join(ROOT, "comictextdetector.pt.onnx"))
-    if PYLIB not in sys.path:
-        sys.path.insert(0, PYLIB)
-
-
-def req_hash():
-    return hashlib.sha256(open(REQUIREMENTS, "rb").read()).hexdigest()
-
-
-def installed():
-    try:
-        return open(MARK, encoding="utf-8").read().strip() == req_hash()
-    except OSError:
-        return False
-
-
-def download_total():
-    try:
-        return int(open(REQUIREMENTS_TOTAL).read().strip()) or FALLBACK_TOTAL
-    except (OSError, ValueError):
-        return FALLBACK_TOTAL
-
-
-def dir_size(path):
-    total = 0
-    for base, _, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(base, f))
-            except OSError:
-                pass
-    return total
+    for p in (os.path.join(DATA, "pylib_models"), PYLIB):   # 기본 패키지(pylib)가 앞
+        if p not in sys.path:
+            sys.path.insert(0, p)
 
 
 def free_port():
@@ -82,59 +33,25 @@ def free_port():
         return s.getsockname()[1]
 
 
-
-
-
-class PipProgress:
-    SIZE = re.compile(r"\((\d+(?:\.\d+)?)\s*(kB|MB|GB|bytes)\)")
-    UNIT = {"bytes": 1, "kB": 1e3, "MB": 1e6, "GB": 1e9}
-
-    def __init__(self, total):
-        self.total, self.done, self.cur, self.cur_total = total, 0, 0, 0
-
-    def feed(self, line):
-        if line.startswith("Progress "):
-            m = re.match(r"Progress (\d+) of (\d+)", line)
-            if m:
-                self.cur, self.cur_total = int(m.group(1)), int(m.group(2))
-            return
-        if ".metadata" in line:   # 메타데이터 파일(수 kB)은 무시
-            return
-        if line.startswith(("Downloading ", "Using cached ")):
-            self.done += self.cur           # 직전 파일은 끝났다
-            self.cur = 0
-            m = self.SIZE.search(line)
-            size = int(float(m.group(1)) * self.UNIT[m.group(2)]) if m else 0
-            if line.startswith("Using cached"):   # 이미 받아 둔 파일: 바로 완료로 친다
-                self.done += size
-                self.cur_total = 0
-            else:
-                self.cur_total = size
-
-    @property
-    def pct(self):
-        return min(99, int(100 * (self.done + self.cur) / self.total)) if self.total else None
-
-
 class Boot:
-    """상태를 들고 뒤에서 설치·다운로드·서버 시작을 한다. 로딩 화면이 status() 를 0.5초마다 읽는다"""
+    """뒤에서 설치·서버 시작을 하고, 로딩 화면이 status() 를 읽는다"""
 
     def __init__(self, window, port):
         self.window, self.port = window, port
         self.url = f"http://127.0.0.1:{port}"
-        self.state = {"phase": "start"}
+        self.state = {"text": "Starting", "pct": None}
         self.lock = threading.Lock()
 
-    def set(self, **kw):
+    def set(self, text, pct=None, error=False):
         with self.lock:
-            self.state = kw
+            self.state = {"text": text, "pct": pct, "error": error}
 
     def status(self):
         with self.lock:
             return dict(self.state)
 
     def retry(self):
-        if self.status().get("phase") == "error":
+        if self.status().get("error"):
             self.start()
         return True
 
@@ -148,101 +65,25 @@ class Boot:
 
     def run(self):
         try:
-            if not installed():
-                self.install()
-            import importlib
-            importlib.invalidate_caches()
-            self.download_models()
-            self.set(phase="load", text="Loading models", done=3)
+            from Process import setup
+            if not setup.installed(setup.CORE_REQ):
+                setup.pip_install(setup.CORE_REQ, self.set)
+            if not setup.installed(setup.MODEL_REQ):   # PyTorch/CUDA 등 3GB. 모델 파일은 처음 PROCESS 때
+                setup.install_model_packages(self.set)
+            self.set("Starting")
             threading.Thread(target=self.serve, daemon=True).start()
             while True:
                 try:
-                    with urllib.request.urlopen(self.url + "/models", timeout=2) as r:
+                    with urllib.request.urlopen(self.url + "/setup/status", timeout=2) as r:
                         if r.status == 200:
                             break
                 except Exception:   # noqa: BLE001  아직 안 떴다
                     pass
-                time.sleep(1)
+                time.sleep(0.5)
             self.window.load_url(self.url)
         except Exception as e:   # noqa: BLE001
             print(f"[launch] failed: {type(e).__name__}: {e}", flush=True)
-            self.set(phase="error", text=str(e)[:300])
-
-    #pip 으로 requirements.txt 를 pylib 에 설치. 진행 막대만 갱신하고 pip 출력은 로그로
-    def install(self):
-        os.makedirs(PYLIB, exist_ok=True)
-        cmd = [PYTHON, PIP, "install", "--target", PYLIB, "--upgrade", "-r", REQUIREMENTS,
-               "--index-url", TORCH_INDEX, "--extra-index-url", "https://pypi.org/simple",
-               "--no-warn-script-location", "--progress-bar", "raw", "--disable-pip-version-check",
-               "--no-build-isolation", "--no-cache-dir"]
-        progress = PipProgress(download_total())
-        self.set(phase="download", text="Downloading packages", pct=0, done=0)
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        shutil.rmtree(TMP, ignore_errors=True)
-        os.makedirs(TMP)
-        env = dict(os.environ, TMPDIR=TMP, TEMP=TMP, TMP=TMP)
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", creationflags=flags, env=env)
-        tail = []
-        installing = threading.Event()
-
-        def watch_install():   # pip --target 은 TMP\pip-target-* 에 먼저 풀고 끝에 pylib 로 옮긴다 → 둘을 합쳐 잰다
-            while not installing.wait(2):
-                pass
-            while p.poll() is None:
-                size = dir_size(PYLIB) + sum(dir_size(os.path.join(TMP, d)) for d in os.listdir(TMP) if d.startswith("pip-target-"))
-                self.set(phase="install", text="Installing packages", pct=min(99, int(100 * size / INSTALL_SIZE)), done=1)
-                time.sleep(2)
-
-        threading.Thread(target=watch_install, daemon=True).start()
-        for line in p.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            tail = (tail + [line])[-30:]
-            if not line.startswith("Progress "):
-                print("[pip]", line, flush=True)
-            progress.feed(line)
-            if line.startswith("Installing collected"):
-                installing.set()
-            elif not installing.is_set():
-                self.set(phase="download", text="Downloading packages", pct=progress.pct, done=0)
-        if p.wait() != 0:
-            raise RuntimeError("Package install failed: " + "\n".join(tail[-5:]))
-        r = subprocess.run([PYTHON, PIP, "install", "--target", PYLIB, "--no-deps", "--upgrade", EXTRA_NO_DEPS,
-                            "--no-warn-script-location", "--disable-pip-version-check", "--no-cache-dir", "-q"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=flags, env=env)
-        if r.returncode != 0:
-            raise RuntimeError("Package install failed: " + (r.stdout + r.stderr)[-500:])
-        shutil.rmtree(TMP, ignore_errors=True)
-        with open(MARK, "w", encoding="utf-8") as f:
-            f.write(req_hash())
-
-    #Hugging Face 모델을 미리 받는다 (안 받아도 backend 가 처음 쓸 때 받지만, 그러면 진행 표시가 없다)
-    def download_models(self):
-        from huggingface_hub import HfApi, snapshot_download
-        from huggingface_hub.utils import tqdm as hf_tqdm
-
-        total = 0
-        for repo, patterns, rev in HF_MODELS:   # 받을 파일 크기 합 (진행 막대의 분모)
-            try:
-                for s in HfApi().model_info(repo, revision=rev, files_metadata=True).siblings:
-                    if any(fnmatch.fnmatch(s.rfilename, pat) for pat in patterns):
-                        total += s.size or 0
-            except Exception:   # noqa: BLE001  크기를 못 얻으면 퍼센트 없이 진행
-                pass
-        got = {"n": 0}
-        boot = self
-
-        class Progress(hf_tqdm):   # 파일 단위 막대(unit="B")의 증가분만 더한다
-            def update(self, n=1):
-                if getattr(self, "unit", "") == "B" and n:
-                    got["n"] += n
-                    boot.set(phase="download", text="Downloading models", pct=min(99, int(100 * got["n"] / total)) if total else None, done=2)
-                return super().update(n)
-
-        self.set(phase="download", text="Downloading models", pct=0 if total else None, done=2)
-        for repo, patterns, rev in HF_MODELS:
-            snapshot_download(repo, revision=rev, allow_patterns=patterns, tqdm_class=Progress)
+            self.set(str(e)[:300], error=True)
 
     def serve(self):
         import uvicorn
@@ -251,7 +92,7 @@ class Boot:
 
 
 def loading_html():
-    return """<!doctype html><html><head><meta charset="utf-8"><title>Manga Translator</title>
+    return """<!doctype html><html><head><meta charset="utf-8"><title>FastManga</title>
 <style>
   html,body{height:100%;margin:0;font-family:Segoe UI,system-ui,sans-serif;background:#0a1033;color:#fff}
   .c{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:0 24px}
@@ -274,14 +115,13 @@ def loading_html():
   async function tick() {
     let s;
     try { s = await window.pywebview.api.status(); } catch { return setTimeout(tick, 500); }
-    const err = s.phase === "error";
-    const pct = (s.pct === null || s.pct === undefined) ? null : s.pct;
-    $("title").textContent = err ? "Setup failed" : (s.done === undefined ? "" : `${s.done}/3  `) + (s.text || "Starting") + (pct !== null ? `  ${pct}%` : "");
-    $("bar").style.display = err ? "none" : "";
+    const pct = s.pct ?? null;
+    $("title").textContent = s.error ? "Setup failed" : s.text + (pct !== null ? `  ${pct}%` : "");
+    $("bar").style.display = s.error ? "none" : "";
     $("bar").classList.toggle("busy", pct === null);
     $("fill").style.width = pct === null ? "" : pct + "%";
-    $("sub").textContent = err ? s.text : (s.phase === "download" || s.phase === "install") ? "First start only. This can take several minutes." : "";
-    $("retry").style.display = err ? "" : "none";
+    $("sub").textContent = s.error ? s.text : (s.text.startsWith("Downloading") || s.text.startsWith("Installing")) ? "First start only." : "";
+    $("retry").style.display = s.error ? "" : "none";
     setTimeout(tick, 500);
   }
   window.addEventListener("pywebviewready", tick);
@@ -311,7 +151,7 @@ def main():
     setup_env()
     import webview
     api = Api()
-    window = webview.create_window("Manga Translator", html=loading_html(), js_api=api, width=1400, height=900, min_size=(900, 600))
+    window = webview.create_window("FastManga", html=loading_html(), js_api=api, width=1400, height=900, min_size=(900, 600))
     api._boot = Boot(window, free_port())
     api._boot.start()
     webview.start(private_mode=False, storage_path=os.path.join(ROOT, "webview"))

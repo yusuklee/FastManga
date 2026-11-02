@@ -26,8 +26,8 @@ def load():
     return _model, _processor, _tokenizer
 
 
-#조각 그림들 → 글자. 4개씩 한 번에
-def recognize(crops, batch=4):
+#조각 그림들 → 글자. 16개씩 한 번에
+def recognize(crops, batch=16):
     if not crops:
         return []
     import torch

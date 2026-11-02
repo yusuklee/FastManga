@@ -11,8 +11,11 @@ export function describeError(e: unknown): { title: string; description: string 
   if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
     return { title: "Can't reach the app server", description: "The local server isn't running. Start it and try again." };
   }
-  if (code === 429 || /RESOURCE_EXHAUSTED|quota/i.test(body)) {
+  if (code === 429 && /daily/i.test(body)) {
     return { title: "Daily limit reached", description: "You've used up today's free requests for this model. Choose a different model in Settings → Models, or try again tomorrow." };
+  }
+  if (code === 429 || /RESOURCE_EXHAUSTED|quota/i.test(body)) {
+    return { title: "Rate limit reached", description: "Too many requests in a short time for this model. Wait a minute and try again, or lower API calls in Settings." };
   }
   if (code === 400 && /API key/i.test(body)) {
     return { title: "API key doesn't work", description: "The key you entered was rejected. Check it in Settings → Models. You can get a new one at aistudio.google.com/apikey." };

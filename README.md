@@ -1,20 +1,22 @@
-<h1 align="center">Manga Translator</h1>
+<h1 align="center">FastManga</h1>
 
 <p align="center">
-<a href="https://github.com/yusuklee/MangaTranslateProject/releases/latest/download/MangaTranslator.zip"><img alt="Download" src="https://img.shields.io/github/v/release/yusuklee/MangaTranslateProject?style=for-the-badge&label=Download&color=f2760a"></a>
+<a href="https://github.com/yusuklee/FastManga/releases/latest/download/Install-FastManga.exe"><img alt="Download" src="https://img.shields.io/github/v/release/yusuklee/FastManga?style=for-the-badge&label=Download&color=f2760a"></a>
 </p>
 
 ---
 
- Detection, OCR and inpainting run locally on your GPU. Translation uses Gemini with your own API key.
+ Detection, OCR and inpainting run locally on your GPU. Translation uses Gemini, Claude, ChatGPT or a local model with your own API key.
 
 ## Install
 
-1. [Download MangaTranslator.zip](https://github.com/yusuklee/MangaTranslateProject/releases/latest/download/MangaTranslator.zip) and extract it anywhere (a short path like `C:\MangaTranslator` is best). Do not run it from inside the zip.
-2. Run **MangaTranslator.bat** in the extracted folder. The first start downloads PyTorch and the models (about 4 GB, one time) into the `app` folder and shows the progress. Later starts open right away.
-3. Open **Settings** and paste your [Gemini API key](https://aistudio.google.com/apikey).
+1. [Download Install-FastManga.exe](https://github.com/yusuklee/FastManga/releases/latest/download/Install-FastManga.exe) and run it. No admin rights needed.
+2. The first start downloads PyTorch with CUDA (about 3 GB, one time, from the same release) and shows the progress. The first time you press **PROCESS** it downloads the detection and OCR models (about 0.8 GB).
+3. Open **Settings** and paste your API key ([Gemini](https://aistudio.google.com/apikey), [Claude](https://platform.claude.com/settings/keys) or OpenAI).
 
-Everything (packages, models, your projects) stays inside that folder. To uninstall, delete the folder.
+When a new version is released the app shows an **Update now** bar on the start screen; it downloads the new Setup, installs it in place and restarts. Packages, models and projects are kept.
+
+Packages, models and your projects stay inside the app folder (`%LOCALAPPDATA%\Programs\FastManga`). Uninstall from Windows Settings → Apps; it asks whether to delete your projects too.
 
 > [!NOTE]
 > Works on any Windows 10/11 PC. With an NVIDIA GPU (driver 570 or newer, no CUDA toolkit needed) a page takes about a second. Without one it falls back to the CPU and is much slower.
@@ -44,10 +46,10 @@ Everything (packages, models, your projects) stays inside that folder. To uninst
 | Step | What happens | Model |
 |---|---|---|
 | Detect | Finds text, speech bubbles and onomatopoeia | RF-DETR |
-| OCR | Reads the Japanese text in every box | manga-ocr |
-| Translate | Sends the page text to Gemini (Japanese → Korean by default, 38 languages available) | Gemini flash |
+| OCR | Reads the text in every box | HAYAI OCR (PaddleOCR-VL optional) |
+| Translate | Sends the page text to the LLM you pick (Japanese → Korean by default, 38 languages available) | Gemini / Claude / ChatGPT / local |
 | Erase | Removes the original text | LaMa |
-| Render | Typesets the translation into the bubbles with the font you pick | – |
+| Render | Typesets the translation into the bubbles with the font you pick; sound effects are redrawn in a matching style | – (own model for sound effects) |
 | Export | Writes the finished pages to a folder | – |
 
 
@@ -55,12 +57,10 @@ Everything (packages, models, your projects) stays inside that folder. To uninst
 ## Models
 
 - Detection: [Koharu Layout RF-DETR Seg 2XL](https://huggingface.co/mayocream/koharu-layout-rfdetr-seg-2xl-1152)
-- OCR: [manga-ocr](https://huggingface.co/kha-white/manga-ocr-base)
+- OCR: [HAYAI OCR v2.5](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova), optional [PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6-GGUF)
 - Text mask: [comic-text-detector](https://github.com/dmMaze/comic-text-detector)
 - Inpainting: [LaMa (anime-manga-big-lama)](https://github.com/advimman/lama)
-- Translation: Gemini 3.5 / 3.6 / 3.7 / 3.8 flash and 3.5 flash-lite,
-- Gemini 3.5 Flash, 3.6 Flash and 3.5 Flash-Lite are the most reliable choices right now.
-- Newer preview models (3.7, 3.8) are often overloaded and fall back to 3.5 Flash automatically.
+- Translation: Gemini flash models, Claude (Sonnet / Haiku / Opus), ChatGPT, or a local GGUF model via llama.cpp
 
 
 
@@ -69,10 +69,10 @@ Everything (packages, models, your projects) stays inside that folder. To uninst
 Python 3.13 and Node.js.
 
 ```
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-models.txt
 cd frontend && npm install && npm run build && cd ..
-python app.py                       # run the desktop app
-python -m uvicorn backend:app        # or just the API server for development (frontend: npm run dev)
+python -m fastapi dev backend.py     # API server (frontend: cd frontend && npm run dev)
+python build/build.py 0.2.0          # portable zip + Setup.exe (needs Inno Setup)
 ```
 
 

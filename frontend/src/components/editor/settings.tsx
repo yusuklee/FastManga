@@ -11,16 +11,18 @@ type Lang = string; //Gemini 에 그대로 넘기는 영어 언어명
 //키들은 설정과 따로 localStorage 에 저장한다
 export type Provider = "gemini" | "chatgpt" | "claude" | "openai" | "local";
 export type OcrModel = "paddle" | "hayai";
+export type Effort = "low" | "medium" | "high";
+export const EFFORTS: Effort[] = ["low", "medium", "high"];
 export type AppSettings = {
   source: Lang; target: Lang; calls: "auto" | number; onomatopoeia: boolean; ocr: OcrModel;
-  provider: Provider; model: string; model2: string; gptModel: string; claudeModel: string; openaiUrl: string; openaiModel: string; localModel: string;
+  provider: Provider; model: string; model2: string; gptModel: string; claudeModel: string; claudeEffort: Effort; openaiUrl: string; openaiModel: string; localModel: string;
   apiKey: string; gptKey: string; claudeKey: string; openaiKey: string;
 };
 
 export const PROVIDERS: Record<Provider, { label: string; url: string; models: string[]; keyUrl: string }> = {
   gemini: { label: "Gemini", url: "", models: ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"], keyUrl: "https://aistudio.google.com/apikey" },
   chatgpt: { label: "ChatGPT", url: "https://api.openai.com/v1", models: ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"], keyUrl: "https://platform.openai.com/api-keys" },
-  claude: { label: "Claude", url: "https://api.anthropic.com/v1", models: ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5-5", "claude-fable-5-1"], keyUrl: "https://platform.claude.com/settings/keys" },
+  claude: { label: "Claude", url: "", models: ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"], keyUrl: "https://platform.claude.com/settings/keys" },
   openai: { label: "OpenAI", url: "", models: [], keyUrl: "" },
   local: { label: "Local", url: "", models: [], keyUrl: "" },
 };
@@ -46,14 +48,14 @@ export const LOCAL_MODELS: { id: string; name: string; size: string }[] = [
 
 export const DEFAULT_SETTINGS: AppSettings = {
   source: "Japanese", target: "Korean", calls: "auto", onomatopoeia: false, ocr: "hayai",
-  provider: "gemini", model: "gemini-3.6-flash", model2: "gemini-3.5-flash", gptModel: "gpt-6-luna", claudeModel: "claude-haiku-4-5-20251001", openaiUrl: "", openaiModel: "", localModel: "gemma4-12b-it",
+  provider: "gemini", model: "gemini-3.5-flash-lite", model2: "gemini-3.6-flash", gptModel: "gpt-6-luna", claudeModel: "claude-sonnet-5-5", claudeEffort: "medium", openaiUrl: "", openaiModel: "", localModel: "gemma4-12b-it",
   apiKey: "", gptKey: "", claudeKey: "", openaiKey: "",
 };
 
-export const translateTarget = (s: AppSettings): { model: string; model2?: string; baseUrl?: string; local?: boolean; headers: Record<string, string> } => {
+export const translateTarget = (s: AppSettings): { model: string; model2?: string; baseUrl?: string; local?: boolean; provider?: "claude"; effort?: Effort; headers: Record<string, string> } => {
   const key = (k: string): Record<string, string> => (k ? { "X-Api-Key": k } : {});
   if (s.provider === "chatgpt") return { model: s.gptModel, baseUrl: PROVIDERS.chatgpt.url, headers: key(s.gptKey) };
-  if (s.provider === "claude") return { model: s.claudeModel, baseUrl: PROVIDERS.claude.url, headers: key(s.claudeKey) };
+  if (s.provider === "claude") return { model: s.claudeModel, provider: "claude", effort: s.claudeEffort, headers: key(s.claudeKey) };
   if (s.provider === "openai") return { model: s.openaiModel, baseUrl: s.openaiUrl, headers: key(s.openaiKey) };
   if (s.provider === "local") return { model: s.localModel, local: true, headers: {} };
   return { model: s.model, model2: s.model2, headers: key(s.apiKey) };   //Gemini: model 이 실패(429·5xx)하면 model2 로
@@ -241,12 +243,10 @@ export const SettingsDialog = memo(function SettingsDialog({
                 <label className="flex items-center gap-2 py-1 text-sm">
                   <input type="checkbox" checked disabled className="accent-primary" />
                   <span>Text</span>
-                  <span className="text-[11px] text-muted-foreground">(dialogue, narration)</span>
                 </label>
                 <label className="flex items-center gap-2 py-1 text-sm">
                   <input type="checkbox" className="accent-primary" checked={settings.onomatopoeia} onChange={(e) => set({ onomatopoeia: e.target.checked })} />
-                  <span>Onomatopoeia</span>
-                  <span className="text-[11px] text-muted-foreground">(sound effects)</span>
+                  <span>Sound effects</span>
                 </label>
               </Section>
             )}
@@ -320,8 +320,18 @@ export const SettingsDialog = memo(function SettingsDialog({
                         {p === "gemini" && (
                           <p className="text-[11px] text-muted-foreground">The main model is tried first on every request. If it fails (limit reached or overloaded), that request uses the sub model.</p>
                         )}
+                        {p === "claude" && (
+                          <>
+                            <Row label="Effort">
+                              <select className={`${selectCls} w-64`} value={settings.claudeEffort} onChange={(e) => set({ claudeEffort: e.target.value as Effort })}>
+                                {EFFORTS.map((m) => <option key={m} value={m}>{m}</option>)}
+                              </select>
+                            </Row>
+                            <p className="text-[11px] text-muted-foreground">How much the model thinks before answering. Higher is slower and costs more output tokens.</p>
+                          </>
+                        )}
                         <p className="mb-1 mt-3 text-[11px] font-medium text-muted-foreground">API key</p>
-                        <KeyInput value={settings[f.key]} placeholder={p === "gemini" ? "AIza..." : "sk-..."} onChange={(k) => { saveKey(p, k); set({ [f.key]: k }); }} />
+                        <KeyInput value={settings[f.key]} placeholder={p === "gemini" ? "AIza..." : p === "claude" ? "sk-ant-..." : "sk-..."} onChange={(k) => { saveKey(p, k); set({ [f.key]: k }); }} />
                         <p className="mt-1.5 text-[11px] text-muted-foreground">
                           Stored only in this browser, sent to your local backend.{p === "gemini" && " Empty = server default key."} Get one at{" "}
                           <a className="underline" href={PROVIDERS[p].keyUrl} target="_blank" rel="noreferrer">{PROVIDERS[p].keyUrl.replace("https://", "")}</a>

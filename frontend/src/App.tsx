@@ -52,6 +52,25 @@ function App() {
     return () => window.clearTimeout(timer);
   }, []);
 
+  //자동 업데이트: 백엔드가 GitHub 최신 릴리스를 확인해 새 버전이면 띠를 띄운다. Update 를 누르면 받아서 설치하고 앱을 다시 켠다
+  type UpdateInfo = { available?: boolean; current: string; latest: string | null; page: string; installed: boolean; state: string; text: string; pct: number | null };
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  useEffect(() => {
+    if (!backendUp) return;
+    fetch(`${API}/update/check`).then(okJson).then((u: UpdateInfo) => { if (u.available) setUpdate(u); }).catch(() => {});
+  }, [backendUp]);
+  const runUpdate = async () => {
+    if (!update) return;
+    if (!update.installed) { window.open(update.page, "_blank"); return; }
+    let s: UpdateInfo = await fetch(`${API}/update/install`, { method: "POST" }).then(okJson);
+    while (s.state === "downloading" || s.state === "installing") {
+      setUpdate({ ...update, ...s });
+      await new Promise((r) => setTimeout(r, 500));
+      s = await fetch(`${API}/update/status`).then(okJson).catch(() => ({ ...s, state: "installing", text: "Restarting..." }));
+    }
+    setUpdate({ ...update, ...s });
+  };
+
   const fail = (e: unknown) => {
     if (e instanceof TypeError) { //fetch 자체가 실패 = 백엔드가 꺼져 있거나 다시 켜지는 중
       setBackendUp(false);
@@ -133,12 +152,29 @@ function App() {
 
   return (
     <div className="min-h-screen bg-muted/60">
+      {update && (
+        <div className="flex items-center justify-center gap-3 bg-primary px-4 py-2 text-sm text-primary-foreground">
+          {update.state === "downloading" || update.state === "installing"
+            ? <span>{update.text}{update.pct !== null && update.pct !== undefined ? ` ${update.pct}%` : ""}</span>
+            : update.state === "error"
+              ? <span>Update failed: {update.text}</span>
+              : <span>FastManga v{update.latest} is available (you have v{update.current}).</span>}
+          {(update.state === "idle" || update.state === "error") && (
+            <button type="button" onClick={runUpdate} className="rounded-md bg-white/20 px-3 py-1 text-xs font-medium hover:bg-white/30">
+              {update.installed ? "Update now" : "Open download page"}
+            </button>
+          )}
+          {(update.state === "idle" || update.state === "error") && (
+            <button type="button" onClick={() => setUpdate(null)} className="text-xs text-white/70 hover:text-white">Later</button>
+          )}
+        </div>
+      )}
       {/* 위쪽 띠: 우주 사진(public/space.png) 위에 어두운 그라데이션을 깔아 글자가 읽히게 */}
       <header className="relative overflow-hidden px-8 pb-16 pt-12 text-white">
         <div className="absolute inset-0 bg-[url('/space.png')] bg-cover bg-center" aria-hidden />
         <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(10,16,51,0.35),rgba(10,16,51,0.75))]" aria-hidden />
         <div className="relative mx-auto max-w-5xl">
-          <p className="text-[11px] font-semibold tracking-[0.25em] text-white/60">MANGA TRANSLATOR</p>
+          <p className="text-[11px] font-semibold tracking-[0.25em] text-white/60">FASTMANGA</p>
           <h1 className="mt-2 text-3xl font-semibold tracking-tight">Projects</h1>
           <p className="mt-1 text-sm text-white/70">Pick a folder of manga pages. Detect, translate, erase, render, export.</p>
         </div>
@@ -161,7 +197,7 @@ function App() {
             className="mt-3 flex w-full flex-col items-center gap-1 rounded-xl border-2 border-dashed border-primary/40 bg-accent/40 px-4 py-6 text-sm transition-colors hover:border-primary hover:bg-accent disabled:opacity-60"
           >
             <span className="text-2xl">📂</span>
-            <span className="font-medium text-accent-foreground">{busy || (backendUp ? "Choose a folder" : "Starting backend... (loading models)")}</span>
+            <span className="font-medium text-accent-foreground">{busy || (backendUp ? "Choose a folder" : "Starting backend...")}</span>
             <span className="text-[11px] text-muted-foreground">Images inside become pages</span>
           </button>
           <input ref={fileRef} type="file" multiple {...{ webkitdirectory: "" }} className="hidden" onChange={handleFiles} />

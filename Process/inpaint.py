@@ -2,7 +2,10 @@ import base64, io
 import numpy as np
 import cv2
 from PIL import Image
-from Process.detect_ocr import square
+
+
+def square(r):
+    return np.ones((2 * r + 1, 2 * r + 1), np.uint8)
 
 
 TILE = 512      # 한 번에 지울 조각의 최대 한 변
@@ -54,21 +57,38 @@ def merge_boxes(boxes, gap=CTX):
 
 
 _lama = None
-def call_lama(crop, mask):
+def get_lama():
     global _lama
     if _lama is None:
         import os, torch
-        from simple_lama_inpainting import SimpleLama
         path = os.environ.get("LAMA_MODEL") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "anime-manga-big-lama.pt")
-        _lama = SimpleLama.__new__(SimpleLama)
-        _lama.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch._C._jit_set_profiling_executor(False)   # 켜 두면 새 입력 크기마다 다시 최적화해서 조각마다 수 초씩 걸린다
+        torch._C._jit_set_profiling_mode(False)
         with open(path, "rb") as f:
-            _lama.model = torch.jit.load(f, map_location=_lama.device).eval().to(_lama.device)
-    out = _lama(Image.fromarray(crop), Image.fromarray(mask))
-    return np.array(out.convert("RGB"))[:crop.shape[0], :crop.shape[1]]
+            _lama = torch.jit.load(f, map_location=dev).eval().to(dev)
+    return _lama
 
 
-def inpaint_lama(image, contents, call_model=call_lama, tile=TILE):
+#같은 크기의 조각 여러 개를 한 번에 지운다. crops: HxWx3 uint8, masks: HxW bool
+def call_lama(crops, masks):
+    import torch
+    model = get_lama()
+    dev = next(model.parameters()).device
+    H, W = crops[0].shape[:2]
+    ph, pw = (8 - H % 8) % 8, (8 - W % 8) % 8
+    x = torch.from_numpy(np.stack([np.pad(c, ((0, ph), (0, pw), (0, 0)), mode="reflect") for c in crops])).to(dev).permute(0, 3, 1, 2).float() / 255
+    m = torch.from_numpy(np.stack([np.pad(k, ((0, ph), (0, pw)), mode="reflect") for k in masks])).to(dev)[:, None].float()
+    with torch.inference_mode():
+        y = model(x, m)
+    return list((y[:, :, :H, :W].permute(0, 2, 3, 1).clamp(0, 1) * 255).round().byte().cpu().numpy())
+
+
+BUCKET = 64     # 조각 크기를 이 단위로 올림해서 같은 크기끼리 묶는다
+MAX_BATCH = 8
+
+
+def inpaint_lama(image, contents, tile=TILE):
     arr = np.array(image.convert("RGB"))
     h, w = arr.shape[:2]
     page_mask = np.zeros((h, w), bool)
@@ -80,12 +100,24 @@ def inpaint_lama(image, contents, call_model=call_lama, tile=TILE):
         else:
             page_mask[y1:y2, x1:x2] |= m
             boxes.append((x1, y1, x2, y2))
+    groups = {}
     for bx1, by1, bx2, by2 in merge_boxes(boxes):
         for y1 in range(by1, by2, tile):
             for x1 in range(bx1, bx2, tile):
                 x2, y2 = min(x1 + tile, bx2), min(y1 + tile, by2)
                 cx1, cy1, cx2, cy2 = max(0, x1 - CTX), max(0, y1 - CTX), min(w, x2 + CTX), min(h, y2 + CTX)
-                out = call_model(arr[cy1:cy2, cx1:cx2], page_mask[cy1:cy2, cx1:cx2].astype(np.uint8) * 255)
+                key = (-(-(cy2 - cy1) // BUCKET) * BUCKET, -(-(cx2 - cx1) // BUCKET) * BUCKET)
+                groups.setdefault(key, []).append((x1, y1, x2, y2, cx1, cy1, cx2, cy2))
+    for (BH, BW), jobs in groups.items():
+        for i in range(0, len(jobs), MAX_BATCH):
+            chunk = jobs[i:i + MAX_BATCH]
+            crops, masks = [], []
+            for x1, y1, x2, y2, cx1, cy1, cx2, cy2 in chunk:
+                crop, mk = arr[cy1:cy2, cx1:cx2], page_mask[cy1:cy2, cx1:cx2]
+                ch, cw = crop.shape[:2]
+                crops.append(np.pad(crop, ((0, BH - ch), (0, BW - cw), (0, 0)), mode="reflect"))
+                masks.append(np.pad(mk, ((0, BH - ch), (0, BW - cw)), mode="reflect"))
+            for (x1, y1, x2, y2, cx1, cy1, cx2, cy2), out in zip(chunk, call_lama(crops, masks)):
                 m = page_mask[y1:y2, x1:x2]
                 arr[y1:y2, x1:x2][m] = out[y1 - cy1:y2 - cy1, x1 - cx1:x2 - cx1][m]
     return Image.fromarray(arr)

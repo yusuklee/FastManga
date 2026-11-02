@@ -1,0 +1,8 @@
+# 처음 PROCESS 할 때 받는 AI 패키지 (Process/setup.py 가 pip 으로 <앱폴더>\pylib 에 넣는다). torch 는 PyTorch 의 cu128 인덱스에서.
+torch==2.11.0
+torchvision==0.26.0
+rfdetr==1.7.0
+transformers==5.16.1
+supervision==0.28.0
+safetensors==0.8.0
+onnxruntime-gpu==1.30.0
