@@ -12,9 +12,14 @@ TILE = 512      # 한 번에 지울 조각의 최대 한 변
 CTX = 128       # 조각 사방에 붙여 모델에 보여줄 배경
 FONT_RATIO = 0.16         # koharu 0.61.2 LEGACY_BLOCK_DILATE_FONT_RATIO
 MIN_R, MAX_R = 2, 8       # LEGACY_MIN/MAX_DILATE_RADIUS
-MIN_PIXELS = 16
-margin1 = 4     # 상자에서 이만큼 밖까지는 글자 번짐이라 버린다
-margin2 = 3     # 그 바깥으로 이만큼이 색을 잴 고리
+EDGE = 4        # 말풍선 모양 경계에서 안팎으로 이만큼은 테두리 선이라 칠하지도 지우지도 않는다
+INK = 110       # 이보다 어두우면 글자 획
+TOL = 12        # 바탕색과 이만큼 안에서 다르면 같은 색
+FLAT = 0.95     # 바탕의 이 비율 이상이 같은 색이면 단색 말풍선
+
+
+def decode(text):
+    return np.array(Image.open(io.BytesIO(base64.b64decode(text))).convert("L")) > 127
 
 
 def box_masks(image, contents):
@@ -25,24 +30,17 @@ def box_masks(image, contents):
         r = int(np.clip(round(min(x2 - x1, y2 - y1) * FONT_RATIO), MIN_R, MAX_R))
         ex1, ey1, ex2, ey2 = max(0, x1 - r), max(0, y1 - r), min(W, x2 + r), min(H, y2 + r)
         page = np.zeros((H, W), np.uint8)
-        page[y1:y2, x1:x2] = np.array(Image.open(io.BytesIO(base64.b64decode(c["mask"])))) > 127 if c.get("mask") else 1
+        page[y1:y2, x1:x2] = decode(c["mask"]) if c.get("mask") else 1
         out.append(((ex1, ey1, ex2, ey2), cv2.dilate(page[ey1:ey2, ex1:ex2], square(r)) > 0))
     return out
 
 
-def uniform_color(arr, box, text_mask):
-    x1, y1, x2, y2 = box
-    sel = np.zeros(arr.shape[:2], bool)
-    sel[max(y1 - margin1, 0):y2 + margin1, max(x1 - margin1, 0):x2 + margin1] = True
-    sel[max(y1 - margin2, 0):y2 + margin2, max(x1 - margin2, 0):x2 + margin2] = False
-    sel[y1:y2, x1:x2] = ~text_mask
-    px = arr[sel]
-    if len(px) < MIN_PIXELS:
-        return None
-    devs = px.std(0)
-    if devs.max() >= (7.0 if devs.std() > 1.0 else 10.0):
-        return None
-    return np.median(px, 0).astype(np.uint8)
+#상자가 지운 자리(지울 때와 같은 마스크)만 원본 픽셀로 되돌린다
+def restore(original, erased, contents):
+    org, arr = np.array(original.convert("RGB")), np.array(erased.convert("RGB"))
+    for (x1, y1, x2, y2), m in box_masks(original, contents):
+        arr[y1:y2, x1:x2][m] = org[y1:y2, x1:x2][m]
+    return Image.fromarray(arr)
 
 
 def merge_boxes(boxes, gap=CTX):
@@ -61,7 +59,7 @@ def get_lama():
     global _lama
     if _lama is None:
         import os, torch
-        path = os.environ.get("LAMA_MODEL") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "anime-manga-big-lama.pt")
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.environ.get("LAMA_MODEL") or "anime-manga-big-lama.pt")   # 상대 경로면 앱 폴더 기준
         dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         torch._C._jit_set_profiling_executor(False)   # 켜 두면 새 입력 크기마다 다시 최적화해서 조각마다 수 초씩 걸린다
         torch._C._jit_set_profiling_mode(False)
@@ -92,14 +90,24 @@ def inpaint_lama(image, contents, tile=TILE):
     arr = np.array(image.convert("RGB"))
     h, w = arr.shape[:2]
     page_mask = np.zeros((h, w), bool)
+    done = np.zeros((h, w), bool)   # 말풍선 색으로 칠한 말풍선 (테두리 포함). 다른 글자의 LaMa 가 덮어쓰지 않게
     boxes = []
-    for (x1, y1, x2, y2), m in box_masks(image, contents):
-        color = uniform_color(arr, (x1, y1, x2, y2), m)
-        if color is not None:
-            arr[y1:y2, x1:x2][m] = color
-        else:
-            page_mask[y1:y2, x1:x2] |= m
-            boxes.append((x1, y1, x2, y2))
+    for c, ((x1, y1, x2, y2), m) in zip(contents, box_masks(image, contents)):
+        if c.get("bubble_mask"):   # 단색 말풍선은 LaMa 없이 안쪽(테두리 띠 제외)을 통째로 말풍선 색으로 칠한다. 뒤 그림이 비치는 말풍선은 LaMa 로
+            bx1, by1, bx2, by2 = c["bubble_area"]
+            shape = decode(c["bubble_mask"]).astype(np.uint8)
+            inner = cv2.erode(shape, square(EDGE)) > 0
+            crop = arr[by1:by2, bx1:bx2]
+            bg = inner & ~(cv2.dilate((crop.mean(2) < INK).astype(np.uint8), square(5)) > 0)   # 글자 획과 그 둘레는 빼고 바탕만
+            if bg.any():
+                med = np.median(crop[bg], 0)
+                if (np.abs(crop[bg] - med).max(1) <= TOL).mean() >= FLAT:
+                    crop[inner] = med.astype(np.uint8)
+                    done[by1:by2, bx1:bx2] |= cv2.dilate(shape, square(EDGE)) > 0
+                    continue
+        page_mask[y1:y2, x1:x2] |= m
+        boxes.append((x1, y1, x2, y2))
+    page_mask &= ~done
     groups = {}
     for bx1, by1, bx2, by2 in merge_boxes(boxes):
         for y1 in range(by1, by2, tile):

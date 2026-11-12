@@ -144,6 +144,12 @@ async def inpaint_lama_route(file: UploadFile, contents: str = Form(...)):
     return png_response(models()[1].inpaint_lama(Image.open(io.BytesIO(await file.read())), json.loads(contents)))
 
 
+#원상복구: 상자들이 지운 자리만 원본(file) 픽셀로 되돌린 erased 를 준다
+@app.post("/restore")
+async def restore_route(file: UploadFile, erased: UploadFile, contents: str = Form(...)):
+    return png_response(models()[1].restore(Image.open(io.BytesIO(await file.read())), Image.open(io.BytesIO(await erased.read())), json.loads(contents)))
+
+
 @app.post("/sfx_render")
 async def sfx_render_route(file: UploadFile, erased: UploadFile, contents: str = Form(...)):
     models()

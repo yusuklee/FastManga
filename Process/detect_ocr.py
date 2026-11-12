@@ -29,6 +29,11 @@ def get_rfdetr():
             strict=True,
         )
         m.model.class_names = ["text", "onomatopoeia", "bubble", "panel"]
+        if m.model.device.type == "cuda":
+            import torch
+            m.optimize_for_inference(compile=False, dtype=torch.float16)
+            m.model.model.to("cpu")
+            torch.cuda.empty_cache()
         _rfdetr = m
     return _rfdetr
 
@@ -134,6 +139,17 @@ def ocr_texts(crops, ocr="hayai"):
     return hayai.recognize(crops)
 
 
+#조각 그림들을 같은 높이로 맞춰 흰 여백을 두고 가로로 붙인다 (떨어진 글자를 한 단어로 읽게)
+def join_crops(crops, h=300, gap=30):
+    ims = [c.convert("RGB").resize((max(1, round(c.width * h / c.height)), h)) for c in crops]
+    out = Image.new("RGB", (sum(i.width for i in ims) + gap * (len(ims) + 1), h + gap * 2), "white")
+    x = gap
+    for im in ims:
+        out.paste(im, (x, gap))
+        x += im.width + gap
+    return out
+
+
 def ocr_boxes(image, boxes, ocr="hayai"):
     image = image.convert("RGB")
     arr = np.array(image)
@@ -148,12 +164,25 @@ def ocr_boxes(image, boxes, ocr="hayai"):
     bbox = {i: (int(x), int(y), int(x + w), int(y + h)) for i, (x, y, w, h, a) in enumerate(stats) if i > 0}
 
     erase_boxes = [expand_RF(labels, bbox, pos) for pos in text_boxes]
-    words = ocr_texts([image.crop(pos) for pos in text_boxes], ocr)
+    crops = [image.crop(pos) for pos in text_boxes]
+    # 사용자가 이은 상자: 순서대로 같은 높이로 맞춰 가로로 이어 붙여 한 번에 읽고, 첫 상자에 넣는다 (나머지는 빈 글자)
+    groups = {}
+    for i, b in enumerate(boxes):
+        if b.get("group") is not None:
+            groups.setdefault(b["group"], []).append(i)
+    grouped = {i for idx in groups.values() for i in idx}
+    solo = [i for i in range(len(crops)) if i not in grouped]
+    words = [""] * len(crops)
+    for i, w in zip(solo, ocr_texts([crops[i] for i in solo], ocr)):
+        words[i] = w
+    for idx in groups.values():   # 묶음은 따로 읽는다 (다른 조각과 한 번에 읽으면 결과가 흔들림)
+        idx.sort(key=lambda i: boxes[i].get("order") or 0)
+        words[idx[0]] = ocr_texts([join_crops([crops[i] for i in idx])], ocr)[0]
 
     lines = []
     for b, pos, erase, word in zip(boxes, text_boxes, erase_boxes, words):
         if not HAS_TEXT.search(word):
-            if not b.get("user"):
+            if not b.get("user") and b.get("group") is None:
                 continue
             word = ""
         ex1, ey1, ex2, ey2 = erase
@@ -166,8 +195,10 @@ def ocr_boxes(image, boxes, ocr="hayai"):
             "page": 1,
             "mask": mask_to_text(page_mask[ey1:ey2, ex1:ex2]),
             "bubble": b.get("bubble"),
+            **({"bubble_area": b["bubble_area"], "bubble_mask": b["bubble_mask"]} if b.get("bubble_mask") else {}),
             **({"user": True} if b.get("user") else {}),
             **({"sfx": True} if b.get("sfx") else {}),
+            **({"group": b["group"], "order": b.get("order")} if b.get("group") is not None else {}),
             "font_size": font_size(line_map, ink, pos),
             "angle": text_angle(line_map, page_mask, pos),
             "color": color,
@@ -176,19 +207,43 @@ def ocr_boxes(image, boxes, ocr="hayai"):
     return lines
 
 
-#종류별 신뢰도 하한. 의성어는 모양이 제각각이라 점수가 낮게 나오니 더 낮게 받는다
-THRESHOLDS = {"text": 0.3, "onomatopoeia": 0.2, "bubble": 0.5}
+THRESHOLD = 0.5   # 신뢰도 하한 (글자·의성어·말풍선 모두)
+
+
+#같은 말풍선 안에서 옆으로 붙은 세로줄(위아래가 반 이상 겹치고 사이가 줄 폭보다 좁음)은 한 문장이 쪼개져 잡힌 것 → 한 상자로
+#(위아래로 떨어진 두 대사는 그대로 둔다)
+def merge_columns(boxes, owners, sfx):
+    boxes, owners, sfx = list(boxes), list(owners), list(sfx)
+    def joined(a, b):
+        gap = max(b[0] - a[2], a[0] - b[2])
+        overlap = min(a[3], b[3]) - max(a[1], b[1])
+        return gap < min(a[2] - a[0], b[2] - b[0]) and overlap > 0.5 * min(a[3] - a[1], b[3] - b[1])
+    i = 0
+    while i < len(boxes):
+        j = next((j for j in range(i + 1, len(boxes)) if owners[i] and owners[j] == owners[i] and not sfx[i] and not sfx[j] and joined(boxes[i], boxes[j])), None)
+        if j is None:
+            i += 1
+            continue
+        a, b = boxes[i], boxes.pop(j); owners.pop(j); sfx.pop(j)
+        boxes[i] = (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+    return boxes, owners, sfx
+
 
 #DETECT: RF-DETR 로 글자 상자·말풍선만 찾는다 (OCR 없음). id 는 0 부터, word 는 빈 문자열
 def detect_boxes(file, classes=("text",)):
     image = file.convert("RGB")
-    d = get_rfdetr().predict(image, threshold=min(THRESHOLDS.values()))
-    keep = [(tuple(max(0, int(v)) for v in b), n) for b, n, s in zip(d.xyxy, d.data["class_name"], d.confidence) if s >= THRESHOLDS.get(n, 0.5)]
-    text_boxes = [b for b, n in keep if n in classes]
-    bubbles = [b for b, n in keep if n == "bubble"]
-    sfx = [n == "onomatopoeia" for _, n in keep if n in classes]
-    return [{"id": i, "pos": p, "bubble": bub, "word": "", "page": 1, **({"sfx": True} if s else {})}
-            for i, (p, bub, s) in enumerate(zip(text_boxes, assign_bubbles(text_boxes, bubbles), sfx))]
+    d = get_rfdetr().predict(image, threshold=THRESHOLD)
+    keep = [(tuple(max(0, int(v)) for v in b), n, k) for k, (b, n) in enumerate(zip(d.xyxy, d.data["class_name"]))]
+    text_boxes = [b for b, n, _ in keep if n in classes]
+    shapes = {b: d.mask[k] for b, n, k in keep if n == "bubble"}   # 말풍선 실제 모양 (페이지 크기)
+    sfx = [n == "onomatopoeia" for _, n, _ in keep if n in classes]
+    owners = assign_bubbles(text_boxes, shapes)
+    text_boxes, owners, sfx = merge_columns(text_boxes, owners, sfx)
+    # bubble: 글자가 든 말풍선 (렌더 영역. 여럿이 같이 쓰면 프런트가 나눈다). bubble_area/bubble_mask: 말풍선 모양 (지우기·폭 재기)
+    return [{"id": i, "pos": p, "bubble": o,
+             **({"bubble_area": o, "bubble_mask": mask_to_text(shapes[o][o[1]:o[3], o[0]:o[2]])} if o else {}),
+             "word": "", "page": 1, **({"sfx": True} if s else {})}
+            for i, (p, o, s) in enumerate(zip(text_boxes, owners, sfx))]
 
 
 def text_colors(arr, page_mask, box):
@@ -222,14 +277,12 @@ def text_colors(arr, page_mask, box):
     return hexc(np.median(px, axis=0)), None
 
 
+#글자 상자 가운데 점이 들어간 말풍선 모양. bubbles: {말풍선 상자: 페이지 크기 모양}
 def assign_bubbles(boxes, bubbles):
     def owner(box):
         cx, cy = (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
-        hit = [b for b in bubbles if b[0] <= cx <= b[2] and b[1] <= cy <= b[3]]
-        return min(hit, key=lambda b: (b[2] - b[0]) * (b[3] - b[1])) if hit else None
-    owners = [owner(b) for b in boxes]
-    shared = {b for b in owners if b is not None and owners.count(b) > 1}
-    return [None if b in shared else b for b in owners]
+        return next((b for b, m in bubbles.items() if m[cy, cx]), None)
+    return [owner(b) for b in boxes]
 
 
 def expand_RF(labels, bbox, box):
@@ -398,4 +451,5 @@ def font_size(line_map, ink, box):
     if g >= BIG_GLYPH:
         return g
     lines = cut_box(line_map, ink, box)
-    return int(np.median([thickness(l) for l in lines])) if lines else thickness(box)
+    t = int(np.median([thickness(l) for l in lines])) if lines else thickness(box)
+    return g if t < g / 2 else t   # 줄 지도가 글자를 놓치고 점(…)만 잡으면 줄이 너무 가늘다 → 글자 덩어리 크기

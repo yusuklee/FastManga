@@ -8,7 +8,6 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("MANGA_DATA_DIR") or ROOT
-PYLIB = os.path.join(DATA, "pylib")
 
 
 def setup_env():
@@ -22,9 +21,8 @@ def setup_env():
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     os.environ.setdefault("LAMA_MODEL", os.path.join(ROOT, "anime-manga-big-lama.pt"))
     os.environ.setdefault("CTD_MODEL", os.path.join(ROOT, "comictextdetector.pt.onnx"))
-    for p in (os.path.join(DATA, "pylib_models"), PYLIB):   # 기본 패키지(pylib)가 앞
-        if p not in sys.path:
-            sys.path.insert(0, p)
+    os.makedirs(os.path.join(ROOT, "packages"), exist_ok=True)   # 없으면 파이썬이 이 경로를 영영 안 봐서 설치 직후 import 가 실패
+    sys.path.insert(0, os.path.join(ROOT, "packages"))
 
 
 def free_port():
@@ -67,7 +65,7 @@ class Boot:
         try:
             from Process import setup
             if not setup.installed(setup.CORE_REQ):
-                setup.pip_install(setup.CORE_REQ, self.set)
+                setup.pip_install(setup.CORE_REQ, self.set, torch_server=False)
             if not setup.installed(setup.MODEL_REQ):   # PyTorch/CUDA 등 3GB. 모델 파일은 처음 PROCESS 때
                 setup.install_model_packages(self.set)
             self.set("Starting")
@@ -120,7 +118,7 @@ def loading_html():
     $("bar").style.display = s.error ? "none" : "";
     $("bar").classList.toggle("busy", pct === null);
     $("fill").style.width = pct === null ? "" : pct + "%";
-    $("sub").textContent = s.error ? s.text : (s.text.startsWith("Downloading") || s.text.startsWith("Installing")) ? "First start only." : "";
+    $("sub").textContent = s.error ? s.text : "";
     $("retry").style.display = s.error ? "" : "none";
     setTimeout(tick, 500);
   }

@@ -67,15 +67,37 @@ def fit_canvas(im, w, h):
     return canvas
 
 
+#칸을 채우게 가로·세로를 따로 늘린다. 한쪽만 STRETCH 배까지 (한글판 효과음도 글자를 길쭉하게 늘려 칸을 채운다)
+STRETCH = 1.4
+def fill_canvas(im, w, h):
+    s = min(w / im.width, h / im.height)
+    sx, sy = min(w / im.width, s * STRETCH), min(h / im.height, s * STRETCH)
+    im = im.resize((max(1, int(im.width * sx)), max(1, int(im.height * sy))), Image.BILINEAR)
+    canvas = Image.new("L", (w, h), 0)
+    canvas.paste(im, ((w - im.width) // 2, (h - im.height) // 2))
+    return canvas
+
+
+SYMS = "♡♥!?"
+def has_char(path, ch):
+    k = ("cmap", path)
+    if k not in _cache:
+        from fontTools.ttLib import TTFont
+        _cache[k] = set(TTFont(path, lazy=True).getBestCmap())
+    return ord(ch) in _cache[k]
+
+
 #한 글자를 w×h L 그림으로. 초성 배율이 1 과 다르면 자모를 정사각형 칸에서 따로 그려 조립한다
 def char_mask(path, ch, w, h, cho_scale):
     w, h = max(8, int(w)), max(8, int(h))
     if not ("가" <= ch <= "힣"):
+        if not has_char(path, ch):   # ♡ 가 없는 폰트는 나눔고딕 것을 쓴다 (굵기는 뒤에서 맞춘다)
+            path = font_paths().get("NanumGothic", path)
         return fit_canvas(glyph(path, ch, w, h), w, h)
     code = ord(ch) - 0xAC00
     cho, jung, jong = CHO[code // 588], JUNG[(code % 588) // 28], JONG[code % 28]
     if abs(cho_scale - 1) < 0.15 or (jung not in VERT_V and jung not in HORI_V):
-        return fit_canvas(glyph(path, ch, w, h), w, h)
+        return fill_canvas(glyph(path, ch, w, h), w, h)
     S = max(w, h)
     canvas = Image.new("L", (S, S), 0)
     cs = min(cho_scale, 2.5)
@@ -96,7 +118,7 @@ def char_mask(path, ch, w, h, cho_scale):
         if jong:
             paste_fit(canvas, glyph(path, jong, S * 0.8, S * 0.3), (S * 0.1, S * 0.7, S * 0.9, S))
     ink = canvas.getbbox()
-    return fit_canvas(canvas.crop(ink) if ink else canvas, w, h)
+    return fill_canvas(canvas.crop(ink) if ink else canvas, w, h)
 
 
 #획 굵기 맞추기: 목표보다 가늘면 두껍게, 굵으면 깎는다
@@ -113,7 +135,7 @@ def match_thickness(mask_im, target_px):
         thin = float(2 * np.percentile(d[ridge], 20)) if ridge.sum() > 10 else cur
         k = min(k, int(0.25 * thin))
     else:
-        k = min(k, max(1, int(0.5 * cur)))
+        k = min(k, max(1, int(cur)))   # 가는 폰트도 원본 굵기까지 (최대 3배)
     if k < 1:
         return mask_im
     ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1))
@@ -134,7 +156,8 @@ def layout_lines(lines, chars_st, region, W, H):
     for li, line in enumerate(lines):
         st = chars_st[idx:idx + len(line)]
         sizes = np.array([float(np.clip(c.get("size", 1.0), 0.6, 1.6)) for c in st] + [1.0] * (len(line) - len(st)))
-        sizes = sizes / sizes.sum() * min(along, cell * len(line) * 1.05)
+        sizes = np.where([ch in SYMS for ch in line], 0.6, sizes)   # ♡·! 는 글자보다 작게
+        sizes = sizes / sizes.sum() * min(along, cell * len(line) * STRETCH)
         pos = (along - sizes.sum()) / 2
         off = (L - 1 - li if vertical else li) * line_gap + line_gap / 2   # 세로쓰기는 오른쪽 줄이 첫 줄
         for ci, ch in enumerate(line):
@@ -151,8 +174,13 @@ def layout_lines(lines, chars_st, region, W, H):
 
 #번역문을 줄로 나눈다: 띄어쓰기가 있으면 그대로 줄, 없으면 영역 비율에 맞게 k 글자씩 (한 줄에 최대 6)
 def split_lines(text, region, W, H):
-    toks = ["".join(ch for ch in t if "가" <= ch <= "힣") for t in text.split()]
-    toks = [t for t in toks if t]
+    toks = []
+    for t in text.replace("♥", "♡").split():
+        t = "".join(ch for ch in t if "가" <= ch <= "힣" or ch in SYMS)
+        if t and toks and not any("가" <= ch <= "힣" for ch in t):
+            toks[-1] += t   # 따로 떨어진 ♡ 는 앞 줄 끝에 붙인다
+        elif t:
+            toks.append(t)
     if not toks:
         plain = [ch for ch in text if not ch.isspace()]
         return [plain] if plain else []
@@ -250,12 +278,17 @@ def measure(jp, bg):
     if ring.sum() > 20 and (labimg[ring] == other).mean() > 0.5 and inside[other] > 0.5:
         outline = cen[other]
         cur = fill.astype(np.uint8)
-        for w in range(1, max(2, int(thick * 0.6)) + 1):
+        top = max(2, int(thick * 0.6))
+        for w in range(1, top + 1):
             nxt = cv2.dilate(cur, np.ones((3, 3), np.uint8))
             band = (nxt > 0) & (cur == 0) & (labimg != fill_c)
             if band.sum() < 10 or (labimg[band] == other).mean() < 0.45:
                 break
             ow, cur = w, nxt
+        #"테두리"가 글자 획만큼 두꺼우면 어느 쪽이 글자인지 애매하다 → 어두운 쪽을 글자로 (흰 테두리 두른 검은 글씨가 흰 글씨로 뒤집혀 잡히던 것)
+        if ow == top and cen[other].mean() < cen[fill_c].mean():
+            fill_c, other = other, fill_c
+            outline, ow = cen[other], 0.4 * thick
     return dict(color=[float(v) / 255 for v in cen[fill_c]], outline=None if outline is None else [float(v) / 255 for v in outline],
                 outline_w=ow / max(thick, 1), thick=thick)
 

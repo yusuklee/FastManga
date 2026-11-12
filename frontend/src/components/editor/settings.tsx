@@ -14,7 +14,7 @@ export type OcrModel = "paddle" | "hayai";
 export type Effort = "low" | "medium" | "high";
 export const EFFORTS: Effort[] = ["low", "medium", "high"];
 export type AppSettings = {
-  source: Lang; target: Lang; calls: "auto" | number; onomatopoeia: boolean; ocr: OcrModel;
+  source: Lang; target: Lang; calls: "auto" | number; ocr: OcrModel;
   provider: Provider; model: string; model2: string; gptModel: string; claudeModel: string; claudeEffort: Effort; openaiUrl: string; openaiModel: string; localModel: string;
   apiKey: string; gptKey: string; claudeKey: string; openaiKey: string;
 };
@@ -47,7 +47,7 @@ export const LOCAL_MODELS: { id: string; name: string; size: string }[] = [
 ];
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  source: "Japanese", target: "Korean", calls: "auto", onomatopoeia: false, ocr: "hayai",
+  source: "Japanese", target: "Korean", calls: "auto", ocr: "hayai",
   provider: "gemini", model: "gemini-3.5-flash-lite", model2: "gemini-3.6-flash", gptModel: "gpt-6-luna", claudeModel: "claude-sonnet-5-5", claudeEffort: "medium", openaiUrl: "", openaiModel: "", localModel: "gemma4-12b-it",
   apiKey: "", gptKey: "", claudeKey: "", openaiKey: "",
 };
@@ -163,6 +163,7 @@ export const SettingsDialog = memo(function SettingsDialog({
   font,
   onFont,
   onChange,
+  needKey,
   onClose,
 }: {
   open: boolean;
@@ -171,9 +172,11 @@ export const SettingsDialog = memo(function SettingsDialog({
   font: FontChoice;
   onFont: (f: FontChoice) => void;
   onChange: (s: AppSettings) => void;
+  needKey?: boolean; //번역이 API 키 때문에 실패해서 열림 → Models 탭, 키 칸 옆 빛나는 표시와 경고
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("language");
+  useEffect(() => { if (open && needKey) setTab("models"); }, [open, needKey]);
   const [customCalls, setCustomCalls] = useState(typeof settings.calls === "number" && !CALL_PRESETS.includes(settings.calls as never));
   const [customStr, setCustomStr] = useState(typeof settings.calls === "number" ? String(settings.calls) : "3");
 
@@ -236,18 +239,6 @@ export const SettingsDialog = memo(function SettingsDialog({
                     </select>
                   </div>
                 </div>
-              </Section>
-            )}
-            {tab === "language" && (
-              <Section title="Detect">
-                <label className="flex items-center gap-2 py-1 text-sm">
-                  <input type="checkbox" checked disabled className="accent-primary" />
-                  <span>Text</span>
-                </label>
-                <label className="flex items-center gap-2 py-1 text-sm">
-                  <input type="checkbox" className="accent-primary" checked={settings.onomatopoeia} onChange={(e) => set({ onomatopoeia: e.target.checked })} />
-                  <span>Sound effects</span>
-                </label>
               </Section>
             )}
             {tab === "language" && (
@@ -330,8 +321,14 @@ export const SettingsDialog = memo(function SettingsDialog({
                             <p className="text-[11px] text-muted-foreground">How much the model thinks before answering. Higher is slower and costs more output tokens.</p>
                           </>
                         )}
-                        <p className="mb-1 mt-3 text-[11px] font-medium text-muted-foreground">API key</p>
+                        <p className="mb-1 mt-3 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                          API key
+                          {needKey && !settings[f.key] && <span className="h-2 w-2 animate-pulse rounded-full bg-red-500 shadow-[0_0_6px_2px_rgba(239,68,68,0.7)]" />}
+                        </p>
                         <KeyInput value={settings[f.key]} placeholder={p === "gemini" ? "AIza..." : p === "claude" ? "sk-ant-..." : "sk-..."} onChange={(k) => { saveKey(p, k); set({ [f.key]: k }); }} />
+                        {needKey && !settings[f.key] && (
+                          <p className="mt-1.5 text-[11px] font-medium text-red-500">{PROVIDERS[p].label} API key is required. Enter it above to translate.</p>
+                        )}
                         <p className="mt-1.5 text-[11px] text-muted-foreground">
                           Stored only in this browser, sent to your local backend.{p === "gemini" && " Empty = server default key."} Get one at{" "}
                           <a className="underline" href={PROVIDERS[p].keyUrl} target="_blank" rel="noreferrer">{PROVIDERS[p].keyUrl.replace("https://", "")}</a>

@@ -1,5 +1,5 @@
 #자동 업데이트: GitHub 최신 릴리스를 보고, 새 버전이면 Setup 파일을 받아 조용히 설치하고 앱을 다시 켠다
-import hashlib, json, os, re, subprocess, sys, threading, urllib.request
+import hashlib, json, os, re, subprocess, threading, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("MANGA_DATA_DIR") or ROOT

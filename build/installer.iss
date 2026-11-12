@@ -38,8 +38,7 @@ Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\launch.py"""; Working
 
 ; 앱이 실행 중에 만든 것(패키지·모델·캐시·로그)은 제거 때 같이 지운다. 프로젝트는 물어보고 지운다
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}\pylib"
-Type: filesandordirs; Name: "{app}\pylib_models"
+Type: filesandordirs; Name: "{app}\packages"
 Type: filesandordirs; Name: "{app}\hf"
 Type: filesandordirs; Name: "{app}\tmp"
 Type: filesandordirs; Name: "{app}\logs"
@@ -48,6 +47,7 @@ Type: filesandordirs; Name: "{app}\llama"
 Type: filesandordirs; Name: "{app}\__pycache__"
 Type: filesandordirs; Name: "{app}\Process\__pycache__"
 Type: filesandordirs; Name: "{app}\fonts\__pycache__"
+Type: files; Name: "{app}\.env"
 
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

@@ -4,10 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text } from "./components/editor/text";
 import { SettingsDialog, DEFAULT_SETTINGS, PAGES_PER_CALL, loadKey, loadSettings, saveSettings, translateTarget, PROVIDERS, LOCAL_MODELS, type AppSettings } from "./components/editor/settings";
 import { SplitButton } from "./components/editor/splitbutton";
+import { ProcessDialog, type DetectWhat } from "./components/editor/processdialog";
 import { PageList } from "./components/editor/pagelist";
 import { RepeatButton } from "./components/editor/repeatbutton";
 import { Toasts, describeError, type Toast } from "./components/editor/toast";
-import { ensureFont, loadImage, renderPage, renderToPng, parallel } from "./components/editor/render";
+import { ensureFont, loadImage, loadMasks, renderPage, renderToPng, parallel } from "./components/editor/render";
 import { pickFolder, saveToFolder, pageFileName, downloadZip, type ExportFile, isDesktopApp, pickFolderDesktop, saveToFolderDesktop } from "./components/editor/export";
 
 import { API } from "./api";
@@ -25,9 +26,14 @@ export type Content = {
   mask?: string; //글자 모양 (base64 PNG), 지우기용
   mask_area?: area; //지우기용 넓힌 상자. mask 는 이 크기
   bubble?: area | null; //글자를 담은 말풍선 상자. 렌더 영역
+  bubble_area?: area; //글자가 들어간 말풍선 상자 (지우기용, 다른 상자와 같이 써도 있음)
+  bubble_mask?: string; //말풍선 실제 모양 (base64 PNG, bubble_area 크기). 지우기 때 이 안을 말풍선 색으로 칠한다
   font_size?: number; //원본 글자 크기(px)
   angle?: number; //원본 줄의 기울기(도, 시계 방향 +). 렌더 때 이만큼 돌려서 찍는다
   user?: boolean; //＋ 로 직접 그린 상자. DETECT 를 다시 해도 남는다
+  group?: number; //사용자가 이은 상자 묶음 번호. 떨어진 글자를 한 단어로 읽고 번역한다
+  order?: number; //묶음 안 순서 (1 부터). 이 순서대로 이어 붙여 읽는다
+  groupText?: string; //묶음 전체 번역문 (첫 상자에만). 이걸 글자 수대로 나눠 각 상자 translated 에 넣는다
   sfx?: boolean; //탐지가 의성어(효과음)로 분류한 상자
   font?: string; //이 상자만 쓸 폰트(family). 없으면 설정의 폰트
   size?: number; //이 상자만 쓸 글자 크기(px). 없으면 영역에 맞춰 자동
@@ -61,7 +67,7 @@ const post_image = async (path: string, page: string, contents?: Content[], extr
 const post_inpaint = async (path: string, page: string, contents: Content[], src = page) => {
   const form = new FormData();
   form.append("file", await (await fetch(src)).blob(), "image.png");
-  form.append("contents", JSON.stringify(contents.map(({ pos, mask_area, mask }) => ({ pos, mask_area, mask }))));
+  form.append("contents", JSON.stringify(contents.map(({ pos, mask_area, mask, bubble_area, bubble_mask }) => ({ pos, mask_area, mask, bubble_area, bubble_mask }))));
   const r = await fetch(`${API}/${path}`, { method: "POST", body: form });
   if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
   return URL.createObjectURL(await r.blob());
@@ -77,24 +83,60 @@ const settle = (res: PromiseSettledResult<Record<string, string>>[]) => {
   }
   return { translations, error };
 };
+//이은 상자: 첫 상자의 묶음 번역문을 상자 넓이 비율대로 글자를 나눠 순서대로 각 상자에 넣는다 (같은 크기 2개에 4글자면 2·2, 3:1 이면 3·1)
+const splitGroups = (contents: Content[]) => {
+  const out = contents.map((c) => ({ ...c }));
+  const groups = new Map<number, Content[]>();
+  for (const c of out) if (c.group != null) groups.set(c.group, [...(groups.get(c.group) ?? []), c]);
+  for (const g of groups.values()) {
+    g.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const chars = [...(g[0].groupText ?? "").replace(/\s+/g, "")];
+    if (g.length < 2 || !chars.length) continue;
+    const w = g.map((c) => Math.max(1, (c.pos[2] - c.pos[0]) * (c.pos[3] - c.pos[1])));
+    const raw = w.map((x) => (chars.length * x) / w.reduce((a, b) => a + b, 0));
+    const n = raw.map(Math.floor);
+    //남은 글자는 소수점 아래가 큰 상자부터 하나씩
+    [...raw.keys()].sort((a, b) => (raw[b] - n[b]) - (raw[a] - n[a])).slice(0, chars.length - n.reduce((a, b) => a + b, 0)).forEach((i) => n[i]++);
+    //글자가 상자 수 이상이면 빈 상자가 없게, 가장 많이 받은 상자에서 하나씩 넘긴다
+    while (chars.length >= g.length && n.some((x) => x === 0)) {
+      n[n.indexOf(Math.max(...n))]--;
+      n[n.indexOf(0)]++;
+    }
+    let k = 0;
+    g.forEach((c, i) => {
+      c.translated = chars.slice(k, k + n[i]).join("");
+      k += n[i];
+    });
+  }
+  return out;
+};
+//번역 결과를 상자에 넣는다. 묶음 첫 상자의 번역은 묶음 전체 번역문이라 groupText 로도 둔다
+const applyTranslations = (contents: Content[], tr: (c: Content) => string | undefined) =>
+  splitGroups(contents.map((c) => {
+    const t = tr(c);
+    return { ...c, translated: t ?? c.translated, ...(t && c.group != null ? { groupText: t } : {}) };
+  }));
 const sfxTargets = (contents: Content[]) => contents.filter((c) => c.sfx && c.translated?.trim());
 const nonSfx = (contents: Content[]) => {
-  const sfx = sfxTargets(contents);
+  const sfx = sfxTargets(contents).filter((s) => !s.user);   //사용자가 그린 효과음 상자는 탐지 중복이 아니니 그 안의 대사를 빼지 않는다
   const area = (b: area) => Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
   return contents.filter((c) => !c.sfx && !sfx.some((s) => {
     const ov = Math.max(0, Math.min(c.pos[2], s.pos[2]) - Math.max(c.pos[0], s.pos[0])) * Math.max(0, Math.min(c.pos[3], s.pos[3]) - Math.max(c.pos[1], s.pos[1]));
     return ov > 0.4 * Math.max(1, Math.min(area(c.pos), area(s.pos)));
   }));
 };
-const post_sfx = async (page: string, erased: string, contents: Content[]) => {
+//원본 페이지 + 지운 이미지를 같이 보내고 PNG 를 받는다 (효과음 그리기, 원상복구)
+const post_pair = async (path: string, page: string, erased: string, contents: Partial<Content>[]) => {
   const form = new FormData();
   form.append("file", await (await fetch(page)).blob(), "image.png");
   form.append("erased", await (await fetch(erased)).blob(), "erased.png");
-  form.append("contents", JSON.stringify(sfxTargets(contents).map(({ pos, mask_area, word, translated }) => ({ pos, mask_area, word, translated }))));
-  const r = await fetch(`${API}/sfx_render`, { method: "POST", body: form });
+  form.append("contents", JSON.stringify(contents));
+  const r = await fetch(`${API}/${path}`, { method: "POST", body: form });
   if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
   return URL.createObjectURL(await r.blob());
 };
+const post_sfx = (page: string, erased: string, contents: Content[]) =>
+  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, translated }) => ({ pos, mask_area, word, translated })));
 
 export function Project({
   project,
@@ -112,6 +154,9 @@ export function Project({
   const [selectedPages, setSelectedPages] = useState<string[]>(pages[0] ? [pages[0]] : []);
   const anchor = useRef<string | null>(pages[0]);
   const targetPages = selectedPages.length ? selectedPages : selectedPage ? [selectedPage] : []; //PROCESS·EXPORT 대상
+  //PROCESS 창에서 고른 번역 항목 (DETECT 가 찾을 종류). 기본은 Text 만
+  const detectWhat = useRef<DetectWhat>({ text: true, sfx: false });
+  const [processDialog, setProcessDialog] = useState<string[] | null>(null); //열려 있으면 처음 체크할 페이지들
   const scrollRef = useRef<HTMLDivElement>(null);
   const toggleFullscreen = () => {
     if (document.fullscreenElement) document.exitFullscreen();
@@ -207,6 +252,7 @@ export function Project({
   const target = translateTarget(settings);
   const modelName = target.model || settings.provider;
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [needKey, setNeedKey] = useState(false); //번역이 API 키 때문에 실패함 → 설정 창에서 키 칸을 강조
   const inpaintModel = "inpaint_lama";
   const translate = async (lines: { id: number; word: string }[]) => {
     const r = await fetch(`${API}/translate`, {
@@ -318,8 +364,15 @@ const handle_detect = async (page=selectedPage!)=>{
   deleteErased(page);
   setView("original");
 
-  const detected:Content[] = await post_image("detect",page,undefined,{ classes: settings.onomatopoeia ? "text,onomatopoeia" : "text" });
-  const users = (pageContents[page] ?? []).filter((c) => c.user).map((c, i) => ({ ...c, id: detected.length + i, word: "", translated: undefined }));
+  const w = detectWhat.current;
+  const classes = [w.text && "text", w.sfx && "onomatopoeia"].filter(Boolean).join(",") || "text";
+  const found:Content[] = await post_image("detect",page,undefined,{ classes });
+  const mine = (pageContents[page] ?? []).filter((c) => c.user);
+  //사용자가 그린 상자가 이긴다: 같은 종류(대사/효과음)의 사용자 상자 안에 대부분 들어가는 탐지 상자는 버린다
+  //(종류가 다르면 남긴다. 큰 효과음 상자 안의 말풍선 대사 등)
+  const inside = (a: area, b: area) => Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) * Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1])) > 0.6 * (a[2] - a[0]) * (a[3] - a[1]);
+  const detected = found.filter((d) => !mine.some((u) => !!u.sfx === !!d.sfx && inside(d.pos, u.pos))).map((d, i) => ({ ...d, id: i }));
+  const users = mine.map((c, i) => ({ ...c, id: detected.length + i, word: "", translated: undefined }));
   const contents = [...detected, ...users];
   setPageContents((prev)=>({...prev,[page]:contents}))
   return contents
@@ -328,7 +381,7 @@ const handle_detect = async (page=selectedPage!)=>{
 //OCR: 페이지의 상자 전부(탐지 + ＋)를 읽는다. 원문·지우기 마스크·글자 크기·색·기울기가 채워진다
 const handle_ocr = async (page: string, contents: Content[] = pageContents[page] ?? []) => {
   if (!contents.length) return contents;
-  const res: Content[] = await post_image("ocr", page, contents.map(({ id, pos, bubble, user, sfx }) => ({ id, pos, bubble, user, sfx })) as Content[], { ocr: settings.ocr });
+  const res: Content[] = await post_image("ocr", page, contents.map(({ id, pos, bubble, bubble_area, bubble_mask, user, sfx, group, order }) => ({ id, pos, bubble, bubble_area, bubble_mask, user, sfx, group, order })) as Content[], { ocr: settings.ocr });
   setPageContents((prev) => ({ ...prev, [page]: res }));
   return res;
 }
@@ -392,7 +445,7 @@ const handle_translate_pages = async (targets: string[]) => {
 
     const done: PageContents = {};
     for (const [pi, page] of detected.entries()) {
-      done[page] = pageContents[page].map((c) => ({ ...c, translated: merged.translations[gid(pi, c.id)] ?? c.translated }));
+      done[page] = applyTranslations(pageContents[page], (c) => merged.translations[gid(pi, c.id)]);
     }
     setPageContents((prev) => ({ ...prev, ...done }));
     for (const page of detected) await ensureSfx(page, done[page]);
@@ -403,12 +456,15 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
     const contents = target ?? pageContents[page];
     if (!contents || !contents.length)return;
     await prepareModels();
-    const image = await post_inpaint(inpaint_model,page,contents,base);
+    setErased(page, await post_inpaint(inpaint_model,page,contents,base));
+}
+//지운 이미지를 바꾸고 저장한다 (저장은 기다리지 않음)
+const setErased = (page: string, image: string) => {
     setInpaintedImgs((prev)=>{
         if (prev[page]?.startsWith("blob:")) URL.revokeObjectURL(prev[page]);
         return {...prev, [page]:image};
     })
-    void saveErased(page, image); //기다리지 않음
+    void saveErased(page, image);
 }
   //효과음 렌더 갱신: 지운 이미지가 있고 번역된 의성어 상자가 있으면 백엔드에 그려 달라고 한다. 조건이 전과 같으면 건너뜀
   const ensureSfx = async (page: string, contents = pageContents[page], erased = inpaintedImgs[page]) => {
@@ -446,12 +502,15 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
     const reused = new Set<string>();
     for (const [page_num ,page ] of targets.entries()){
         const prev = pageContents[page];
-        if (prev?.length && prev.every((c) => c.mask)) {
+        //전에 찾은 상자를 다시 쓴다. 단 효과음을 켰는데 전에 효과음 없이 찾았으면 새로 찾는다
+        if (prev?.length && prev.every((c) => c.mask) && (!detectWhat.current.sfx || prev.some((c) => c.sfx))) {
             detected[page] = prev;
             reused.add(page);
         } else {
             setProgress(`DETECT ${page_num+1}/${targets.length}`);
-            detected[page]=await handle_ocr(page, await handle_detect(page));
+            const old = new Map((prev ?? []).filter((c) => c.word && c.translated).map((c) => [c.word, c.groupText ?? c.translated]));   //원문이 같으면 전 번역을 옮겨서 다시 번역하지 않는다
+            const read = await handle_ocr(page, await handle_detect(page));
+            detected[page] = applyTranslations(read, (c) => (c.translated ? undefined : old.get(c.word)));
         }
         if (page_num + 1 - start >= per || page_num + 1 === targets.length) send(page_num + 1);
     }
@@ -467,7 +526,7 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
     const { translations, error } = await translating;
     const done: PageContents = {};
     for (const [pi, page] of targets.entries()) {
-      done[page] = detected[page].map((c) => ({ ...c, translated: translations[gid(pi, c.id)] ?? c.translated }));
+      done[page] = applyTranslations(detected[page], (c) => translations[gid(pi, c.id)]);
     }
     setPageContents((prev) => ({ ...prev, ...done }));
     for (const [i, page] of targets.entries()) {
@@ -486,10 +545,93 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
   const removeBox = useCallback((id: number) => {
     const page = selectedPage;
     if (!page) return;
-    setPageContents((prev) => ({ ...prev, [page]: (prev[page] ?? []).filter((c) => c.id !== id) }));
+    setPageContents((prev) => ({ ...prev, [page]: ungroup(prev[page] ?? [], id, true).filter((c) => c.id !== id) }));
   }, [selectedPage]);
   const [addingBox, setAddingBox] = useState(false);
-  const [addTool, setAddTool] = useState<"rect" | "pen" | "trash">("rect"); //사각형 드래그 / 펜으로 둘러 그리기(그 테두리 상자) / 상자 누르면 삭제
+  const [addTool, setAddTool] = useState<"rect" | "pen" | "trash" | "restore" | "link" | "brush">("rect"); //사각형 드래그 / 펜으로 둘러 그리기(그 테두리 상자) / 상자 누르면 삭제 / 상자 누르면 원상복구 / 상자 잇기 / 칠해서 지우기
+  const [brush, setBrush] = useState(30); //지우기 붓 굵기 (이미지 px)
+  //원상복구: 상자가 지운 자리를 원본으로 되돌리고 상자(번역)를 뺀다 → 그 자리는 다시 원문
+  const restoreBox = async (id: number) => {
+    const page = selectedPage, c = page ? pageContents[page]?.find((x) => x.id === id) : undefined;
+    if (!page || !c) return;
+    try {
+      const erased = inpaintedImgs[page];
+      if (erased) setErased(page, await post_pair("restore", page, erased, [{ pos: c.pos, mask_area: c.mask_area, mask: c.mask }]));
+      removeBox(id);
+    } catch (e) { setProgress(`Restore error: ${(e as Error).message}`); }
+  };
+  //붓으로 칠한 자리를 LaMa 로 지운다 (지운 이미지가 있으면 그 위에, 없으면 원본에)
+  const eraseStroke = async (page: string, path: [number, number][]) => {
+    const r = brush / 2, xs = path.map((q) => q[0]), ys = path.map((q) => q[1]);
+    const x1 = Math.max(0, Math.floor(Math.min(...xs) - r)), y1 = Math.max(0, Math.floor(Math.min(...ys) - r));
+    const x2 = Math.min(imgSize[0], Math.ceil(Math.max(...xs) + r)), y2 = Math.min(imgSize[1], Math.ceil(Math.max(...ys) + r));
+    if (x2 - x1 < 2 || y2 - y1 < 2) return;
+    const cv = document.createElement("canvas");
+    cv.width = x2 - x1; cv.height = y2 - y1;
+    const g = cv.getContext("2d")!;
+    g.fillStyle = "#000"; g.fillRect(0, 0, cv.width, cv.height);
+    g.strokeStyle = "#fff"; g.lineWidth = brush; g.lineCap = "round"; g.lineJoin = "round";
+    g.beginPath();
+    path.forEach(([x, y], i) => (i ? g.lineTo(x - x1, y - y1) : g.moveTo(x - x1, y - y1)));
+    if (path.length === 1) g.lineTo(path[0][0] - x1 + 0.1, path[0][1] - y1);   //한 번 찍기 = 점
+    g.stroke();
+    const area: area = [x1, y1, x2, y2];
+    setProgress("Erasing...");
+    try {
+      await handle_inpaint(inpaintModel, page, [{ id: -1, pos: area, mask_area: area, mask: cv.toDataURL("image/png").split(",")[1], word: "", page: 1, bubble: null }], inpaintedImgs[page]);
+      if (view === "original") setView("inpainted");
+      setProgress("Erased");
+    } catch (e) { setProgress(`Erase error: ${(e as Error).message}`); }
+  };
+  //잇기 (파워포인트 연결선처럼): 점에서 끌어 다른 점에 놓으면 잇고, 연결선을 끌어 빈 곳에 놓으면 끊는다. detach = 끌고 있는 연결선의 끝 상자
+  const [linkDrag, setLinkDrag] = useState<{ from: number; detach?: number; x: number; y: number } | null>(null);
+  //묶음이 바뀐 상자는 다시 읽고 다시 번역해야 한다. mask 를 지우면 다음 PROCESS 가 그 페이지를 다시 찾고 읽는다
+  const fresh = (c: Content): Content => ({ ...c, word: "", translated: undefined, groupText: undefined, mask: undefined });
+  //상자 하나를 묶음에서 빼고 남은 순서를 1 부터 다시 매긴다. 하나만 남은 묶음은 푼다
+  //keep: 그 상자를 지우거나 원상복구할 때. 남은 상자는 제 몫의 번역을 그대로 둔다 (잇기를 바꿀 때만 다시 읽게 비운다)
+  const ungroup = (cs: Content[], id: number, keep = false) => {
+    const g = cs.find((c) => c.id === id)?.group;
+    if (g == null) return cs;
+    const rest = cs.filter((c) => c.group === g && c.id !== id).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const reset = (c: Content) => (keep ? c : fresh(c));
+    return cs.map((c) => {
+      const k = rest.indexOf(c);
+      if (c.id !== id && k < 0) return c;
+      return c.id === id || rest.length < 2 ? { ...reset(c), group: undefined, order: undefined, groupText: undefined } : { ...reset(c), order: k + 1 };
+    });
+  };
+  //a 뒤에 b 를 잇는다. a 가 묶음이 없으면 새 묶음(a=1, b=2)
+  const linkIn = (cs: Content[], a: number, b: number) => {
+    const A = cs.find((c) => c.id === a);
+    if (!A || a === b || (A.group != null && cs.find((c) => c.id === b)?.group === A.group)) return cs;
+    cs = ungroup(cs, b);
+    const g = A.group ?? cs.reduce((m, c) => Math.max(m, c.group ?? 0), 0) + 1;
+    const last = A.group != null ? cs.filter((c) => c.group === g).reduce((m, c) => Math.max(m, c.order ?? 0), 0) : 1;
+    return cs.map((c) => (c.id === b ? { ...fresh(c), group: g, order: last + 1 } : c.id === a || (A.group != null && c.group === g) ? { ...fresh(c), group: g, order: c.order ?? 1 } : c));
+  };
+  const linkDot = (c: Content) => [(c.pos[0] + c.pos[2]) / 2, c.pos[1]] as const;
+  const onLinkMove = (e: React.PointerEvent) => {
+    if (linkDrag) { const [x, y] = toImg(e); setLinkDrag({ ...linkDrag, x, y }); }
+  };
+  //놓은 자리 가까운 점의 상자에 잇는다. 연결선을 끌던 중이면 원래 끝 상자는 먼저 뺀다 (빈 곳에 놓으면 빼기만)
+  const onLinkUp = () => {
+    const page = selectedPage, d = linkDrag;
+    setLinkDrag(null);
+    if (!page || !d) return;
+    const r = imgSize[0] / 110;
+    setPageContents((prev) => {
+      let cs = prev[page] ?? [];
+      const to = cs.find((c) => c.id !== d.from && Math.hypot(linkDot(c)[0] - d.x, linkDot(c)[1] - d.y) < r * 2.5);
+      if (d.detach != null && to?.id === d.detach) return prev;
+      if (d.detach != null) cs = ungroup(cs, d.detach);
+      if (to) cs = linkIn(cs, d.from, to.id);
+      return { ...prev, [page]: cs };
+    });
+  };
+  const unlinkDot = (id: number) => {
+    const page = selectedPage;
+    if (page) setPageContents((prev) => ({ ...prev, [page]: ungroup(prev[page] ?? [], id) }));
+  };
   const [addRect, setAddRect] = useState<[number, number, number, number] | null>(null);
   const [penPath, setPenPath] = useState<[number, number][]>([]);
   const addStart = useRef<[number, number] | null>(null);
@@ -500,25 +642,31 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
   const onAddDown = (e: React.PointerEvent) => {
     if (e.button !== 0 || !selectedPage) return;
     const at = toImg(e);
-    if (addTool === "trash") {   //누른 자리에 있는 상자 중 가장 작은 것을 지운다
+    if (addTool === "trash" || addTool === "restore") {   //누른 자리에 있는 상자 중 가장 작은 것을 지우거나 원상복구
       const hit = (pageContents[selectedPage] ?? []).filter((c) => at[0] >= c.pos[0] && at[0] <= c.pos[2] && at[1] >= c.pos[1] && at[1] <= c.pos[3])
         .sort((a, b) => (a.pos[2] - a.pos[0]) * (a.pos[3] - a.pos[1]) - (b.pos[2] - b.pos[0]) * (b.pos[3] - b.pos[1]))[0];
-      if (hit) removeBox(hit.id);
+      if (hit) void (addTool === "trash" ? removeBox(hit.id) : restoreBox(hit.id));
       return;
     }
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
     addStart.current = at;
-    if (addTool === "pen") setPenPath([at]);
+    if (addTool === "pen" || addTool === "brush") setPenPath([at]);
     else setAddRect([...at, ...at] as [number, number, number, number]);
   };
   const onAddMove = (e: React.PointerEvent) => {
     if (!addStart.current) return;
     const [x, y] = toImg(e), [sx, sy] = addStart.current;
-    if (addTool === "pen") setPenPath((p) => [...p, [x, y]]);
+    if (addTool === "pen" || addTool === "brush") setPenPath((p) => [...p, [x, y]]);
     else setAddRect([Math.min(sx, x), Math.min(sy, y), Math.max(sx, x), Math.max(sy, y)]);
   };
   const onAddUp = () => {
     const page = selectedPage;
+    if (addTool === "brush") {
+      if (addStart.current && page && penPath.length) void eraseStroke(page, penPath);
+      addStart.current = null;
+      setPenPath([]);
+      return;
+    }
     //펜: 그린 선을 감싸는 사각형이 상자
     const r: [number, number, number, number] | null = addTool === "pen"
       ? (penPath.length > 1 ? [Math.min(...penPath.map((q) => q[0])), Math.min(...penPath.map((q) => q[1])), Math.max(...penPath.map((q) => q[0])), Math.max(...penPath.map((q) => q[1]))] : null)
@@ -530,7 +678,7 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
     setPageContents((prev) => {
       const cur = prev[page] ?? [];
       const id = cur.reduce((m, x) => Math.max(m, x.id), -1) + 1;
-      return { ...prev, [page]: [...cur, { id, pos: r, word: "", page: 1, bubble: null, user: true }] };
+      return { ...prev, [page]: [...cur, { id, pos: r, word: "", page: 1, bubble: null, user: true, sfx: true }] };   //그린 상자는 처음엔 Auto(효과음 모델)
     });
     setProgress("Box added · run OCR or PROCESS");
   };
@@ -554,8 +702,9 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
       await ensureBoxFonts(curContents ?? []);
       const withSfx = shownView === "rendered" && !!curSfx; //효과음은 백엔드가 그린 바탕에 이미 들어 있으니 캔버스로는 대사만
       const image = await loadImage(shownView === "original" ? selectedPage : (withSfx ? curSfx : curInpainted) ?? selectedPage);
+      await loadMasks(curContents ?? []);
       if (stale) return;
-      renderPage(canvas, image, withSfx ? nonSfx(curContents ?? []) : curContents ?? [], font, shownView === "rendered");
+      renderPage(canvas, image, withSfx ? nonSfx(curContents ?? []) : curContents ?? [], font, shownView === "rendered", curContents ?? []);
       setImgSize([image.naturalWidth, image.naturalHeight]);
     })().catch((e) => setProgress(`Error: ${(e as Error).message}`));
     return () => {
@@ -602,7 +751,7 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
     { value: "render", label: "RENDER" },
   ];
   const run_action = async () => {
-    if (action === "process") return handle_all(targetPages);
+    if (action === "process") return setProcessDialog(targetPages);
     if (action === "render") return setView("rendered");
     return run_step(action);
   };
@@ -633,6 +782,7 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
     try {
       await fn();
     } catch (e) {
+      if (/API key/i.test(String((e as Error)?.message))) { setNeedKey(true); setSettingsOpen(true); }   //키가 없거나 틀리면 설정 Models 탭을 띄운다
       const { title, description } = describeError(e);
       setProgress(`Error: ${title}`);
       notify({ kind: "error", title, description });
@@ -643,10 +793,11 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
   const editContent = useCallback((id: number, patch: Partial<Content>) => {
     const page = selectedPage;
     if (!page) return;
-    setPageContents((prev) => ({
-      ...prev,
-      [page]: (prev[page] ?? []).map((c) => (c.id === id ? { ...c, ...patch } : c)),
-    }));
+    setPageContents((prev) => {
+      const cs = prev[page] ?? [];
+      const g = "sfx" in patch ? cs.find((c) => c.id === id)?.group : undefined;   //Auto/Settings 는 이은 묶음 전체에
+      return { ...prev, [page]: cs.map((c) => (c.id === id || (g != null && c.group === g) ? { ...c, ...patch } : c)) };
+    });
   }, [selectedPage]);
   //상자별 폰트(c.font)로 지정된 것들도 파일을 받아 둬야 canvas 가 그 폰트로 그린다
   const ensureBoxFonts = (cs: Content[]) =>
@@ -677,11 +828,20 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
           ["rect", "Rectangle: drag over the text", <rect key="r" x="4" y="5" width="16" height="14" rx="1.5" strokeDasharray="4 2.5" />],
           ["pen", "Pen: draw around the text, the box wraps the stroke", <g key="p"><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L11 16l-4 1 1-4Z" /><path d="M3 21c3 0 5-2 5-5" /></g>],
           ["trash", "Trash: click a box to remove it", <g key="t"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" /></g>],
+          ["restore", "Restore: click a box to put the original text back there and drop its translation", <g key="u"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></g>],
+          ["link", "Link: drag from a box's top dot to another box's dot (reading order) to read separated letters as one word. Drag a link line to empty space to unlink", <g key="l"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></g>],
+          ["brush", "Erase brush: paint over anything to erase it", <g key="b"><path d="M9.06 11.9l8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08" /><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z" /></g>],
         ] as const).map(([tool, tip, icon]) => (
           <button key={tool} type="button" className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${addTool === tool ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`} onClick={() => setAddTool(tool)} title={tip}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
           </button>
         ))}
+        {addingBox && addTool === "brush" && (
+          <label className="flex items-center gap-1 text-xs text-muted-foreground" title="Brush size (image px)">
+            <input type="range" min={4} max={200} value={brush} onChange={(e) => setBrush(Number(e.target.value))} className="w-20" />
+            <span className="w-7 tabular-nums">{brush}</span>
+          </label>
+        )}
 
         <div className="ml-1 flex overflow-hidden rounded-lg border bg-background text-xs">
           {(["original", "inpainted", "rendered"] as const).map((v) => (
@@ -706,7 +866,7 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
             onRun={() => run(run_action)}
             suffix={targetPages.length > 1 ? ` (${targetPages.length})` : ""}
           />
-          <Button variant="secondary" size="sm" onClick={() => run(() => handle_all())}>PROCESS ALL</Button>
+          <Button variant="secondary" size="sm" onClick={() => setProcessDialog(pages)}>PROCESS ALL</Button>
           <Button variant="outline" size="sm" onClick={() => run(handle_export)}>EXPORT</Button>
         </div>
       </header>
@@ -761,21 +921,81 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
                       fit === "page" ? `h-auto w-auto max-w-full ${fullscreen ? "max-h-[calc(100vh-5.5rem)]" : "max-h-[calc(100vh-10.5rem)]"}` : "h-auto max-w-full"
                     }`}
                   />
-                  {imgSize[0] > 0 && (curContents ?? []).some((c) => c.user && !c.word) && (
+                  {imgSize[0] > 0 && (curContents ?? []).some((c) => c.user && !c.word && !c.translated) && (
                     <svg className="pointer-events-none absolute inset-0 z-20 h-full w-full overflow-visible" viewBox={`0 0 ${imgSize[0]} ${imgSize[1]}`} preserveAspectRatio="none">
-                      {(curContents ?? []).filter((c) => c.user && !c.word).map((c) => (
+                      {(curContents ?? []).filter((c) => c.user && !c.word && !c.translated).map((c) => (
                         <rect key={c.id} x={c.pos[0]} y={c.pos[1]} width={c.pos[2] - c.pos[0]} height={c.pos[3] - c.pos[1]} fill="rgba(59,130,246,0.12)" stroke="#3b82f6" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />
                       ))}
                     </svg>
                   )}
-                  {addingBox && imgSize[0] > 0 && (
-                    <div className={`absolute inset-0 z-30 touch-none ${addTool === "trash" ? "cursor-pointer" : "cursor-crosshair"}`} onPointerDown={onAddDown} onPointerMove={onAddMove} onPointerUp={onAddUp} onPointerCancel={onAddUp}>
+                  {imgSize[0] > 0 && (addingBox || shownView !== "rendered") && (curContents ?? []).some((c) => c.group != null) && (() => {
+                    //이은 상자: 위 가운데 점끼리 점선으로 잇고, 상자 위에 순서 번호
+                    const r = imgSize[0] / 110;
+                    const dot = (c: Content) => [(c.pos[0] + c.pos[2]) / 2, c.pos[1]] as const;
+                    const groups = new Map<number, Content[]>();
+                    for (const c of curContents ?? []) if (c.group != null) groups.set(c.group, [...(groups.get(c.group) ?? []), c]);
+                    return (
+                      <svg className="pointer-events-none absolute inset-0 z-[25] h-full w-full overflow-visible" viewBox={`0 0 ${imgSize[0]} ${imgSize[1]}`} preserveAspectRatio="none">
+                        {[...groups.values()].map((g) => {
+                          const s = [...g].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+                          return (
+                            <g key={s[0].id}>
+                              {s.slice(1).map((c, i) => linkDrag?.detach === c.id ? null : <line key={c.id} x1={dot(s[i])[0]} y1={dot(s[i])[1]} x2={dot(c)[0]} y2={dot(c)[1]} stroke="#f97316" strokeWidth={3} strokeDasharray="8 6" vectorEffect="non-scaling-stroke" />)}
+                              {s.map((c) => (
+                                <g key={c.id}>
+                                  <rect x={c.pos[0]} y={c.pos[1]} width={c.pos[2] - c.pos[0]} height={c.pos[3] - c.pos[1]} fill="none" stroke="#f97316" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+                                  <circle cx={dot(c)[0]} cy={dot(c)[1] - r * 2.2} r={r * 1.4} fill="#f97316" />
+                                  <text x={dot(c)[0]} y={dot(c)[1] - r * 2.2} fill="#fff" fontSize={r * 1.9} fontWeight={700} textAnchor="middle" dominantBaseline="central">{c.order}</text>
+                                </g>
+                              ))}
+                            </g>
+                          );
+                        })}
+                      </svg>
+                    );
+                  })()}
+                  {addingBox && addTool === "link" && imgSize[0] > 0 && (() => {
+                    const r = imgSize[0] / 110;
+                    const start = (e: React.PointerEvent, from: number, detach?: number) => {
+                      if (e.button !== 0) return;
+                      e.stopPropagation();
+                      (e.currentTarget.closest("[data-link-layer]") as Element).setPointerCapture(e.pointerId);
+                      const [x, y] = toImg(e);
+                      setLinkDrag({ from, detach, x, y });
+                    };
+                    const cs = curContents ?? [];
+                    const pairs = [...new Set(cs.map((c) => c.group).filter((g) => g != null))].flatMap((g) => {
+                      const s = cs.filter((c) => c.group === g).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+                      return s.slice(1).map((c, i) => [s[i], c] as const);
+                    });
+                    const from = linkDrag && cs.find((c) => c.id === linkDrag.from);
+                    return (
+                      <div data-link-layer className="absolute inset-0 z-30 touch-none" onPointerMove={onLinkMove} onPointerUp={onLinkUp} onPointerCancel={onLinkUp}>
+                        <svg className="pointer-events-none h-full w-full overflow-visible" viewBox={`0 0 ${imgSize[0]} ${imgSize[1]}`} preserveAspectRatio="none">
+                          {cs.filter((c) => c.group == null).map((c) => <rect key={c.id} x={c.pos[0]} y={c.pos[1]} width={c.pos[2] - c.pos[0]} height={c.pos[3] - c.pos[1]} fill="rgba(59,130,246,0.08)" stroke="#3b82f6" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />)}
+                          {/* 연결선: 굵은 투명 선이 잡는 자리. 끌어서 다른 점에 놓으면 다시 잇고 빈 곳에 놓으면 끊긴다 */}
+                          {pairs.map(([a, b]) => linkDrag?.detach === b.id ? null : (
+                            <line key={b.id} className="pointer-events-auto cursor-grab" x1={linkDot(a)[0]} y1={linkDot(a)[1]} x2={linkDot(b)[0]} y2={linkDot(b)[1]} stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" onPointerDown={(e) => start(e, a.id, b.id)} />
+                          ))}
+                          {cs.map((c) => (
+                            <circle key={c.id} className="pointer-events-auto cursor-crosshair" cx={linkDot(c)[0]} cy={linkDot(c)[1]} r={r} fill={linkDrag?.from === c.id ? "#f97316" : "#fff"} stroke="#3b82f6" strokeWidth={3} vectorEffect="non-scaling-stroke"
+                              onPointerDown={(e) => start(e, c.id)} onContextMenu={(e) => { e.preventDefault(); unlinkDot(c.id); }} />
+                          ))}
+                          {from && <line x1={linkDot(from)[0]} y1={linkDot(from)[1]} x2={linkDrag!.x} y2={linkDrag!.y} stroke="#f97316" strokeWidth={3} strokeDasharray="8 6" vectorEffect="non-scaling-stroke" />}
+                        </svg>
+                      </div>
+                    );
+                  })()}
+                  {addingBox && addTool !== "link" && imgSize[0] > 0 && (
+                    <div className={`absolute inset-0 z-30 touch-none ${addTool === "trash" || addTool === "restore" ? "cursor-pointer" : "cursor-crosshair"}`} onPointerDown={onAddDown} onPointerMove={onAddMove} onPointerUp={onAddUp} onPointerCancel={onAddUp}>
                       <svg className="pointer-events-none h-full w-full overflow-visible" viewBox={`0 0 ${imgSize[0]} ${imgSize[1]}`} preserveAspectRatio="none">
-                        {addTool === "trash" && (curContents ?? []).map((c) => (
-                          <rect key={c.id} x={c.pos[0]} y={c.pos[1]} width={c.pos[2] - c.pos[0]} height={c.pos[3] - c.pos[1]} fill="rgba(239,68,68,0.10)" stroke="#ef4444" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+                        {(addTool === "trash" || addTool === "restore") && (curContents ?? []).map((c) => (
+                          <rect key={c.id} x={c.pos[0]} y={c.pos[1]} width={c.pos[2] - c.pos[0]} height={c.pos[3] - c.pos[1]} fill={addTool === "trash" ? "rgba(239,68,68,0.10)" : "rgba(34,197,94,0.10)"} stroke={addTool === "trash" ? "#ef4444" : "#22c55e"} strokeWidth={2} vectorEffect="non-scaling-stroke" />
                         ))}
                         {addRect && <rect x={addRect[0]} y={addRect[1]} width={addRect[2] - addRect[0]} height={addRect[3] - addRect[1]} fill="rgba(59,130,246,0.15)" stroke="#3b82f6" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />}
-                        {penPath.length > 1 && <polyline points={penPath.map((q) => q.join(",")).join(" ")} fill="none" stroke="#3b82f6" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
+                        {addTool === "brush"
+                          ? penPath.length > 0 && <polyline points={(penPath.length > 1 ? penPath : [penPath[0], penPath[0]]).map((q) => q.join(",")).join(" ")} fill="none" stroke="rgba(239,68,68,0.45)" strokeWidth={brush} strokeLinecap="round" strokeLinejoin="round" />
+                          : penPath.length > 1 && <polyline points={penPath.map((q) => q.join(",")).join(" ")} fill="none" stroke="#3b82f6" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
                       </svg>
                     </div>
                   )}
@@ -790,7 +1010,7 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
           {rightOpen && (
             <Panel defaultSize="20%" minSize="14%" className="flex flex-col border-l bg-background">
               <div className="min-h-0 flex-1 overflow-y-auto">
-                <Text contents={contents} fonts={fontChoices} selectedArea={selectedArea} onSelect={setSelectedArea} onEdit={editContent} onRemove={removeBox} onCollapse={() => setRightOpen(false)} />
+                <Text contents={contents} fonts={fontChoices} selectedArea={selectedArea} onSelect={setSelectedArea} onEdit={editContent} onRemove={removeBox} onRestore={restoreBox} onCollapse={() => setRightOpen(false)} />
               </div>
               {/* 오른쪽 아래: 설정 창 여는 버튼 */}
               <div className="shrink-0 border-t bg-muted/40 p-2">
@@ -823,10 +1043,24 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
         font={font}
         onFont={set_font}
         onChange={setSettings}
-        onClose={() => setSettingsOpen(false)}
+        needKey={needKey}
+        onClose={() => { setSettingsOpen(false); setNeedKey(false); }}
       />
 
       <Toasts items={toasts} onClose={closeToast} />
+
+      <ProcessDialog
+        open={processDialog !== null}
+        pages={pages}
+        initialPages={processDialog ?? []}
+        what={detectWhat.current}
+        onCancel={() => setProcessDialog(null)}
+        onStart={(picked, what) => {
+          detectWhat.current = what;
+          setProcessDialog(null);
+          run(() => handle_all(picked));
+        }}
+      />
 
       {setup && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">

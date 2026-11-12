@@ -20,7 +20,8 @@ def load():
             proc = snapshot_download(PROC_REPO, revision=PROC_REV, allow_patterns=PROC_PATTERNS)
             config = AutoConfig.from_pretrained(path, trust_remote_code=True)
             config.vision_config = Siglip2VisionConfig.from_pretrained(proc).to_dict()
-            _model = AutoModel.from_pretrained(path, config=config, trust_remote_code=True).to("cuda" if torch.cuda.is_available() else "cpu").eval()
+            cuda = torch.cuda.is_available()
+            _model = AutoModel.from_pretrained(path, config=config, trust_remote_code=True, dtype=torch.float16 if cuda else torch.float32).to("cuda" if cuda else "cpu").eval()
             _processor = AutoProcessor.from_pretrained(proc)
             _tokenizer = PreTrainedTokenizerFast.from_pretrained(path)
     return _model, _processor, _tokenizer
@@ -36,7 +37,7 @@ def recognize(crops, batch=16):
         words = []
         for i in range(0, len(crops), batch):
             inputs = processor(images=[c.convert("RGB") for c in crops[i:i + batch]], max_num_patches=384, return_tensors="pt").to(model.device)
-            texts = model.generate(pixel_values=inputs["pixel_values"], pixel_attention_mask=inputs["pixel_attention_mask"],
+            texts = model.generate(pixel_values=inputs["pixel_values"].to(model.dtype),pixel_attention_mask=inputs["pixel_attention_mask"],
                                    spatial_shapes=inputs["spatial_shapes"], tokenizer=tokenizer, max_new_tokens=256, repetition_penalty=1.0)
             words += [str(t).strip() for t in texts]
         return words

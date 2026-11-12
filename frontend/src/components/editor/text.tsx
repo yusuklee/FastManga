@@ -12,6 +12,7 @@ export const Text = memo(function Text({
   onSelect,
   onEdit,
   onRemove,
+  onRestore,
   onCollapse,
 }: {
   contents: Content[];
@@ -20,6 +21,7 @@ export const Text = memo(function Text({
   onSelect: (key: string | null) => void;
   onEdit: (id: number, patch: Partial<Content>) => void; //번역문·폰트·크기 직접 고치기 → 그림·내보내기에 반영
   onRemove?: (id: number) => void; //상자 지우기 (오탐)
+  onRestore?: (id: number) => void; //원상복구: 그 자리를 원문으로 되돌리고 상자를 뺀다
   onCollapse?: () => void; //패널 접기 (VS Code 사이드바처럼)
 }) {
   const [openGroup, setOpenGroup] = useState(true);
@@ -61,6 +63,16 @@ export const Text = memo(function Text({
                   <div className="mt-2 border-t pt-2">
                     <p className="text-[10px] font-medium text-muted-foreground">Source</p>
                     <p className="text-xs text-muted-foreground">{c.word}</p>
+                    {c.user && (
+                      <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+                        <p className="text-[10px] font-medium text-muted-foreground">Style{c.group != null && " (whole linked group)"}</p>
+                        <div className="mt-0.5 flex overflow-hidden rounded-lg border text-xs">
+                          {([[true, "Auto", "Sound-effect style model picks the lettering"], [false, "Settings", "Font from Settings, original text size"]] as const).map(([sfx, label, tip]) => (
+                            <button key={label} type="button" title={tip} className={`flex-1 px-2 py-1 ${!!c.sfx === sfx ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`} onClick={() => onEdit(c.id, { sfx })}>{label}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <p className="mt-2 text-[10px] font-medium text-muted-foreground">Translation</p>
                     <textarea
                       value={c.translated ?? ""}
@@ -83,6 +95,9 @@ export const Text = memo(function Text({
                           className="h-8 w-full rounded-lg border bg-background px-2 text-sm outline-none focus:border-primary"
                         />
                       </label>
+                      {onRestore && (
+                        <button type="button" className="mt-4 h-8 rounded-lg border px-2 text-xs hover:bg-muted" onClick={() => onRestore(c.id)} title="Put the original text back here">Restore</button>
+                      )}
                       {onRemove && (
                         <button type="button" className="mt-4 h-8 rounded-lg border px-2 text-xs text-destructive hover:bg-muted" onClick={() => onRemove(c.id)} title="Remove this box">Delete</button>
                       )}
