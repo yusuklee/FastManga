@@ -46,7 +46,6 @@ def main(version, runtime=True):
     shutil.copytree(os.path.join(ROOT, "Process"), os.path.join(APP, "Process"), ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copytree(os.path.join(ROOT, "frontend", "dist"), os.path.join(APP, "frontend", "dist"))
     shutil.copytree(os.path.join(ROOT, "fonts"), os.path.join(APP, "fonts"), ignore=shutil.ignore_patterns("__pycache__"))
-    shutil.copytree(os.path.join(ROOT, "models"), os.path.join(APP, "models"))   # 효과음 스타일 모델 (sfx_ar.pt)
     with open(os.path.join(APP, "version.txt"), "w", encoding="utf-8") as f:   # 자동 업데이트가 쓰는 현재 버전
         f.write(version)
 

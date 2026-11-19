@@ -187,16 +187,21 @@ def ocr_boxes(image, boxes, ocr="hayai"):
             word = ""
         ex1, ey1, ex2, ey2 = erase
         mask, letter = page_mask[ey1:ey2, ex1:ex2], False
-        from Process import sam_mask
         from Process.sfx_style import stroke_width
-        if b.get("user") and b.get("sfx"):   # 사람이 그린 효과음 상자: 글자 마스크를 SAM 2.1 로 (탐지기가 못 잡은 큰 효과음은 comic-text-detector 마스크도 조각난다)
-            (erase, mask), letter = sam_mask.letter_mask(image, pos), True
-        # 글자색·테두리(대사·효과음 같은 방식)와 대사 글자 크기는 SAM 2.1 둘째 후보 마스크로 정한다 (11-15 결정). 크기를 못 재면 예전 방식(글자 줄 굵기)
-        area, masks, _ = sam_mask.candidates(image, pos)
-        glyphs = np.zeros(arr.shape[:2], bool)
-        glyphs[area[1]:area[3], area[0]:area[2]] = masks[1]
+        # 글자 마스크 (11-19 결정): 대사는 전부 comic-text-detector, 효과음은 전부 SAM 2.1. 글자색·테두리·굵기를 정하는 방식은 둘이 같다 (enclosed_colors)
+        if b.get("sfx"):
+            from Process import sam_mask
+            erase, mask = sam_mask.letter_mask(image, pos)   # 지우기도 SAM 2.1 마스크로
+            letter = bool(b.get("user"))                     # 사람이 그린 상자만 회전·크기까지 이 마스크로 정한다
+            area, masks, _ = sam_mask.candidates(image, pos)
+            glyphs = np.zeros(arr.shape[:2], bool)
+            glyphs[area[1]:area[3], area[0]:area[2]] = masks[1]   # 색은 둘째 후보(가장 넓게 잡는 것)로
+            size = 0
+        else:
+            glyphs = page_mask
+            count = len("".join(word.split()))   # 글자 크기 (11-19 결정): 글자 상자 넓이 ÷ 글자 수 의 제곱근 (글자 하나가 차지하는 정사각형의 한 변). 글자가 없으면 예전 방식(글자 줄 굵기)
+            size = round(((pos[2] - pos[0]) * (pos[3] - pos[1]) / count) ** 0.5) if count else 0
         color, stroke, stroke_w, glyph = enclosed_colors(arr, pos, glyphs)
-        size = 0 if b.get("sfx") else sam_mask.text_size(masks[1], len("".join(word.split())))
         lines.append({
             **({"id": b["id"]} if "id" in b else {}),
             "pos": pos,

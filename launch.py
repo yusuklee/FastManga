@@ -1,10 +1,11 @@
-#배포본 실행 파일. 첫 실행이면 기본 패키지를 받고, 백엔드를 띄운 뒤 창에 연다. AI 패키지·모델은 앱 안에서 처음 PROCESS 할 때 받는다
+#배포본 실행 파일. 첫 실행이면 기본 패키지 → PyTorch 묶음 받기 → 풀기와 동시에 모델 받기를 하고, 백엔드를 띄운 뒤 창에 연다
 import os
 import socket
 import sys
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("MANGA_DATA_DIR") or ROOT
@@ -23,6 +24,48 @@ def setup_env():
     os.environ.setdefault("CTD_MODEL", os.path.join(ROOT, "comictextdetector.pt.onnx"))
     os.makedirs(os.path.join(ROOT, "packages"), exist_ok=True)   # 없으면 파이썬이 이 경로를 영영 안 봐서 설치 직후 import 가 실패
     sys.path.insert(0, os.path.join(ROOT, "packages"))
+
+
+#처음 켤 때 허깅페이스에서 받는 모델 (저장소, 받을 파일, 버전)
+def hf_models():
+    from Process.hayai import REPO, REV, PROC_REPO, PROC_REV, PATTERNS, PROC_PATTERNS
+    from Process.sam_mask import REPO as SAM_REPO, REV as SAM_REV, PATTERNS as SAM_PATTERNS
+    from Process.sfx_model import REPO as SFX_REPO, REV as SFX_REV, PATTERNS as SFX_PATTERNS
+    return [
+        ("mayocream/koharu-layout-rfdetr-seg-2xl-1152", ["model.safetensors"], None),   # RF-DETR
+        (REPO, PATTERNS, REV),   # OCR (HAYAI, 16비트 314MB)
+        (PROC_REPO, PROC_PATTERNS, PROC_REV),   # HAYAI 전처리기
+        (SAM_REPO, SAM_PATTERNS, SAM_REV),   # 효과음의 글자 마스크 (SAM 2.1, 16비트 449MB)
+        (SFX_REPO, SFX_PATTERNS, SFX_REV),   # 효과음 스타일 모델 (폰트·기울이기·첫 글자 비율·늘이기)
+    ]
+
+
+def models_downloaded():
+    from huggingface_hub import snapshot_download
+    try:
+        for repo, patterns, rev in hf_models():
+            snapshot_download(repo, revision=rev, allow_patterns=patterns, local_files_only=True)
+        return True
+    except Exception:   # noqa: BLE001
+        return False
+
+
+#모델 저장소들을 동시에 받는다 (저장소마다 연결을 여는 시간이 겹쳐서 차례로 받는 것보다 빠르다). 진행률은 전부 합쳐서 알린다
+def download_models(progress):
+    from huggingface_hub import snapshot_download
+    from tqdm.auto import tqdm
+    bars = {}
+
+    class Bar(tqdm):
+        def update(self, n=1):
+            super().update(n)
+            if self.unit != "B" or not self.total:
+                return
+            bars[id(self)] = (self.n, self.total)
+            got, total = sum(v[0] for v in bars.values()), sum(v[1] for v in bars.values())
+            progress(f"Downloading models  {got / 1e9:.1f} GB / {total / 1e9:.1f} GB", int(100 * got / total))
+    with ThreadPoolExecutor(4) as pool:
+        list(pool.map(lambda m: snapshot_download(m[0], revision=m[2], allow_patterns=m[1], tqdm_class=Bar), hf_models()))
 
 
 def free_port():
@@ -64,10 +107,27 @@ class Boot:
     def run(self):
         try:
             from Process import setup
-            if not setup.installed(setup.CORE_REQ):
-                setup.pip_install(setup.CORE_REQ, self.set, torch_server=False)
-            if not setup.installed(setup.MODEL_REQ):   # PyTorch/CUDA 등 3GB. 모델 파일은 처음 PROCESS 때
-                setup.install_model_packages(self.set)
+            pool, models, unpacking = ThreadPoolExecutor(2), [], threading.Event()
+            core = None
+            if not setup.installed(setup.CORE_REQ):   # 기본 패키지는 PyTorch 묶음을 받는 동안 같이 깐다
+                core = pool.submit(setup.pip_install, setup.CORE_REQ, lambda text, pct: None, False)
+            def quiet(text, pct):   # 풀기 동안 진행 표시는 풀기 쪽만
+                if not unpacking.is_set():
+                    self.set(text, pct)
+            def start_models():
+                if core:
+                    core.result()   # 모델 받기와 풀기는 기본 패키지가 다 깔린 뒤에
+                if not models and not models_downloaded():
+                    models.append(pool.submit(download_models, quiet))
+            def downloaded():   # PyTorch 묶음을 다 받음 → 푸는 동안 모델을 같이 받는다
+                unpacking.set()
+                start_models()
+            if not setup.installed(setup.MODEL_REQ):   # PyTorch/CUDA 등 3GB
+                setup.install_model_packages(self.set, downloaded)
+            unpacking.clear()
+            start_models()   # PyTorch 묶음이 이미 있었거나 pip 로 깔았으면 여기서
+            for m in models:
+                m.result()
             self.set("Starting")
             threading.Thread(target=self.serve, daemon=True).start()
             while True:

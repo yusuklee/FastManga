@@ -1,6 +1,6 @@
 import threading
 
-REPO, REV = "JustANormalTinkerer/hayai-ocr-v2.5-nova", "2803d0dc005fa4396ab1e7c5a472d2c450a247f7"
+REPO, REV = "yusuklee/hayai-ocr-v2.5-nova-fp16", "f41549c9bb5eef527aa0ea34bd30a750ceee54a8"   # JustANormalTinkerer/hayai-ocr-v2.5-nova (2803d0d) 를 16비트로만 바꾼 것 (받는 양 628MB → 314MB, 읽은 글자는 같음)
 PROC_REPO, PROC_REV = "google/siglip2-base-patch16-naflex", "b53b807d3a2d5e2b3911292f2d69e5341cdc064c"
 PATTERNS = ["*.json", "*.py", "*.safetensors", "*.txt"]
 PROC_PATTERNS = ["*.json", "*.txt", "*.model"]

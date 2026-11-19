@@ -13,7 +13,7 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-#AI 패키지·모델은 처음 PROCESS 할 때 받는다. 그 전엔 탐지·OCR·지우기 라우트가 409 를 돌려준다
+#처음 PROCESS 할 때 탐지 모델을 메모리에 올린다 (AI 패키지·모델 파일은 앱을 켤 때 launch.py 가 받는다). 그 전엔 탐지·OCR·지우기 라우트가 409 를 돌려준다
 @app.post("/setup/prepare")
 def setup_prepare():
     setup.prepare()

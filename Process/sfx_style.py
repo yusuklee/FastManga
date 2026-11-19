@@ -1,11 +1,10 @@
-#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·글자 줄 기울기는 원본에서 재고, 글씨체는 models/sfx_ar.pt 가 정한다
+#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·글자 줄 기울기는 원본에서 재고, 폰트·기울이기·첫 글자 비율·늘이기는 모델(Process/sfx_model.py)이 정한다
 import os, math, threading
 import numpy as np, cv2
 from PIL import Image, ImageDraw, ImageFont
 from Process.inpaint import decode
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMG = 224
 _lock = threading.Lock()
 _cache = {}
 
@@ -68,7 +67,6 @@ def split_lines(text, region, W, H):
 
 
 EM = 240            # 글자를 이 크기(폰트 px)로 그려 조립한 뒤 상자에 맞게 줄인다
-SMALL = 0.85        # 둘째 글자부터 크기 기본값 (첫 글자 대비). 효과음은 첫 글자가 크다. 상자에 small 이 있으면 그 값
 SYM = 0.5           # ♡·!·? 크기
 SHIFT = (0.0, 0.16)  # 첫 글자·나머지 글자를 옆으로 어긋나게 (EM 대비, 세로쓰기면 + 가 오른쪽)
 GAP = 0.0           # 글자 사이 (EM 대비). 손 렌더와 비교해 0 이 가장 비슷
@@ -102,7 +100,7 @@ def paste_max(dst, src, x, y):
 
 
 #글자 줄들을 한 덩어리(L)로. 세로쓰기는 첫 줄이 오른쪽. 길이는 (줄 방향, 옆 방향) 으로 다뤄 가로·세로를 같은 코드로
-def text_block(path, lines, vertical, small=SMALL):
+def text_block(path, lines, vertical, small):
     size = lambda a: a.shape if vertical else a.shape[::-1]
     empty = lambda along, across: np.zeros((along, across) if vertical else (across, along), np.uint8)
     put = lambda dst, src, along, across: paste_max(dst, src, across, along) if vertical else paste_max(dst, src, along, across)
@@ -268,48 +266,6 @@ def rect_region(rect, lines, st, W, H):
 
 #글씨체 → (폰트, 기울이기). 기울이기는 모델이 아직 안 내서 글씨체별 기본값 (음수면 위가 오른쪽으로 비스듬히).
 #brush_hand 는 Nanum Brush Script 가 너무 가늘어서 East Sea Dokdo (11-12 33페이지 손 렌더 비교)
-STYLE_FONT = {
-    "marker_hand": ("Dokdo", -0.15), "pen_hand": ("Nanum Pen", -0.1), "brush_font": ("East Sea Dokdo", -0.25), "brush_slant": ("Kirang Haerang", -0.2),
-    "marker_font": ("Jua", -0.1), "brush_hand": ("East Sea Dokdo", -0.2), "round_hand": ("Gaegu", 0.0), "bold_hand": ("Black Han Sans", -0.1), "gothic_font": ("NanumGothic", 0.0),
-}
-MODEL_PATH = os.environ.get("SFX_STYLE_MODEL") or os.path.join(ROOT, "models", "sfx_ar.pt")
-
-
-#글씨체만 쓴다: 모델의 그림 인코더(ResNet18)와 글씨체 머리만 만들고, 글자별 값을 내는 디코더 가중치는 읽지 않는다
-def _net():
-    if "net" not in _cache:
-        import torch, torch.nn as nn, torchvision
-        ck = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
-
-        class Net(nn.Module):
-            def __init__(self, n_styles, d=256):
-                super().__init__()
-                self.bb = torchvision.models.resnet18(weights=None)
-                self.bb.fc = nn.Identity()
-                self.ctx = nn.Sequential(nn.Linear(512 + 1, d), nn.ReLU())
-                self.style = nn.Linear(d, n_styles)
-
-        net = Net(len(ck["styles"])).eval()
-        net.load_state_dict({k: v for k, v in ck["state"].items() if k.split(".")[0] in ("bb", "ctx", "style")})
-        _cache["net"] = (net, ck["styles"])
-    return _cache["net"]
-
-
-#일본어 조각 → 글씨체 (STYLE_FONT 의 키)
-def predict(jp_im):
-    import torch
-    net, styles = _net()
-    w, h = jp_im.size
-    s = IMG / max(w, h)
-    im = jp_im.resize((max(1, round(w * s)), max(1, round(h * s))), Image.BILINEAR)
-    canvas = Image.new("RGB", (IMG, IMG), (128, 128, 128))
-    canvas.paste(im, ((IMG - im.width) // 2, (IMG - im.height) // 2))
-    x = (torch.from_numpy(np.asarray(canvas).astype(np.float32) / 255).permute(2, 0, 1) - 0.5) / 0.5
-    with torch.no_grad():
-        ctx = net.ctx(torch.cat([net.bb(x[None]), torch.tensor([[math.log(w / h)]], dtype=torch.float32)], 1))
-        return styles[int(net.style(ctx).argmax(1)[0])]
-
-
 _SMALL = str.maketrans("ぁぃぅぇぉゃゅょゎ", "あいうえおやゆよわ")
 _JSTRIP = set("っッーｰ〜~…・.。、,!?！？♡♥❤☆★「」『』()（） \u3000-")
 def jnorm(t):
@@ -407,16 +363,16 @@ def render_page(original, erased, contents):
             m = measure(page, (max(0, px1), max(0, py1), min(W, px2), min(H, py2)))   # 색·테두리·굵기는 대사와 같은 방식으로 (글자 상자 기준)
             if m is None:
                 continue
-            style = predict(Image.fromarray(jp))
             #기울기는 글자 상자(pos) 안의 지운 어두운 잉크로 잰다 (지운 영역 mask_area 는 넓어서 옆 그림 선까지 걸리고, 흰 테두리는 방향을 흐린다)
             pj = src[max(0, py1):py2, max(0, px1):px2]
             rect = None if letter is None else min_rect(letter)   # 글자 마스크가 있으면 회전·크기를 그걸 감싸는 직사각형으로 정한다
             m["tilt"] = tilt(diff_mask(pj, out[max(0, py1):py2, max(0, px1):px2]) & (pj.mean(2) < 100)) if rect is None else rect[4]
-            items.append(dict(box=(bx1, by1, bx2, by2), region=region, lines=lines, m=m, style=style, c=c, group=c.get("group"), rect=rect))
-        for it in items:   # 글씨체: 상자 값 > 모델이 고른 것
-            name, it["skew"] = STYLE_FONT[it["style"]]
+            items.append(dict(box=(bx1, by1, bx2, by2), region=region, lines=lines, m=m, c=c, group=c.get("group"), rect=rect, pos=(max(0, px1), max(0, py1), min(W, px2), min(H, py2))))
+        from Process.sfx_model import predict
+        for it, s in zip(items, predict(page, [it["pos"] for it in items])):   # 모델 몫 4개: 상자에 값이 있으면 그 값, 없으면 모델이 고른 것
             c = it["c"]
-            it["font"] = c["font"] if c.get("font") in font_paths() else name if name in font_paths() else "Dokdo"
+            it["font"] = c["font"] if c.get("font") in font_paths() else s["font"] if s["font"] in font_paths() else "Dokdo"
+            it["skew"], it["small"], it["stretch"] = float(c.get("skew", s["skew"])), float(c.get("small", s["small"])), float(c.get("stretch", s["stretch"]))
         groups = {}
         for it in items:
             if it["group"] is not None:
@@ -427,9 +383,7 @@ def render_page(original, erased, contents):
                 it["font"] = lead["font"]
         for it in items:
             m = it["m"]
-            c = it["c"]
-            skew = float(c.get("skew", it["skew"]))
-            st = dict(font=it["font"], skew=skew, small=float(c.get("small", SMALL)), stretch=float(c.get("stretch", 1.0)), rotate=m["tilt"], color=m["color"], outline=m["outline"],
+            st = dict(font=it["font"], skew=it["skew"], small=it["small"], stretch=it["stretch"], rotate=m["tilt"], color=m["color"], outline=m["outline"],
                       outline_w=m["outline_w"], thick=m["thick"])
             bx1, by1, bx2, by2 = it["box"]
             region = rect_region(it["rect"], it["lines"], st, bx2 - bx1, by2 - by1) if it["rect"] else it["region"]

@@ -1,13 +1,10 @@
 import os
 import subprocess
 import threading
-import importlib.util
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from Process.update import current_version
-from Process.hayai import REPO as HAYAI_REPO, REV as HAYAI_REV, PROC_REPO, PROC_REV, PATTERNS as HAYAI_PATTERNS, PROC_PATTERNS
-from Process.sam_mask import REPO as SAM_REPO, REV as SAM_REV, PATTERNS as SAM_PATTERNS
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 PYTHON = os.path.join(ROOT, "python", "python.exe")
@@ -20,10 +17,6 @@ MODEL_REQ = os.path.join(ROOT, "requirements-models.txt")
 TORCH_LOCATION = "https://download.pytorch.org/whl/cu128"
 RUNTIME_URL = "https://huggingface.co/yusuklee/FastManga-runtime/resolve/main/runtime.zip"
 TMP = os.path.join(ROOT, "tmp")
-
-
-HAS_PYTHON = os.path.isfile(PYTHON)
-
 
 
 
@@ -105,7 +98,10 @@ def unpack(dest):
         if not hasattr(local, "zip"):
             local.zip = zipfile.ZipFile(dest)
             zips.append(local.zip)
-        path = local.zip.extract(info, PACKAGES)
+        try:
+            path = local.zip.extract(info, PACKAGES)
+        except PermissionError:   # 앱이 쓰고 있는 파일 (모델을 받는 중인 hf_xet.pyd). 기본 패키지로 이미 깔린 같은 버전이라 건너뛴다
+            path = os.path.join(PACKAGES, info.filename)
         if path.endswith(".pyc"):   # pyc 에 적힌 원본 .py 수정 시간. 풀면서 바뀐 .py 시간을 이걸로 되돌려야 pyc 가 쓰인다
             with open(path, "rb") as f:
                 mtime = int.from_bytes(f.read(12)[8:], "little")
@@ -135,51 +131,6 @@ def install_model_packages(progress, downloaded=lambda: None):
     pip_install(MODEL_REQ, progress)
 
 
-def models_downloaded():
-    from huggingface_hub import snapshot_download
-    try:
-        for repo, patterns, rev in HF_MODELS:
-            snapshot_download(repo, revision=rev, allow_patterns=patterns, local_files_only=True)
-        return True
-    except Exception:
-        return False
-
-
-
-HF_MODELS = [
-    ("mayocream/koharu-layout-rfdetr-seg-2xl-1152", ["model.safetensors"], None),  #RF-DETR
-    (HAYAI_REPO, HAYAI_PATTERNS, HAYAI_REV),   #OCR
-    (PROC_REPO, PROC_PATTERNS, PROC_REV), #HAYAI 전처리기
-    (SAM_REPO, SAM_PATTERNS, SAM_REV),   #사람이 그린 효과음 상자의 글자 마스크 (SAM 2.1, 약 900MB)
-]
-
-
-
-
-
-
-def download_models(progress):
-    from huggingface_hub import  snapshot_download
-    from tqdm.auto import tqdm
-
-    class Bar(tqdm):
-        def update(self, n=1):
-            super().update(n)
-            if self.unit != "B":
-                return
-            progress(f"Downloading models  {int(self.n / 1e9)} GB / {int(self.total / 1e9)} GB", int(100 * self.n / self.total))
-    for repo, patterns, ver in HF_MODELS:
-        snapshot_download(repo, revision=ver, allow_patterns=patterns, tqdm_class=Bar)
-
-
-
-
-def packages_ready():
-    if HAS_PYTHON:
-        return installed(MODEL_REQ)
-    return all(importlib.util.find_spec(m) is not None for m in ("torch", "rfdetr", "transformers", "onnxruntime"))
-
-
 status = {"state": "idle", "text": "", "pct": None}
 _lock = threading.Lock()
 
@@ -188,28 +139,9 @@ def progress(text, pct):
     status.update(state="working", text=text, pct=pct)
 
 
-#모델 받기를 런타임 풀기와 동시에 한다 (2026-11-08 측정: 받기 57초 → 풀기 27초 ∥ 모델 21초, 차례로보다 약 20초 빠름.
-#런타임 받기와 동시에 받으면 인터넷을 나눠 써서 8초만 줄어든다). 풀기 동안 진행 표시는 풀기 쪽만
+#PROCESS 를 처음 누를 때: 탐지 모델을 메모리에 올린다. AI 패키지와 모델 파일은 앱을 켤 때 launch.py 가 이미 받았다
 def _run():
-    pool = ThreadPoolExecutor(1)
     try:
-        models = []
-        unpacking = threading.Event()
-        def quiet(text, pct):
-            if not unpacking.is_set():
-                progress(text, pct)
-        def start_models():
-            if not models and not models_downloaded():
-                models.append(pool.submit(download_models, quiet))
-        def downloaded():   # 런타임 zip 을 다 받음 → 풀기와 동시에 모델을 받는다
-            unpacking.set()
-            start_models()
-        if not packages_ready():
-            install_model_packages(progress, downloaded)
-        unpacking.clear()
-        start_models()   # 런타임이 이미 있었거나 pip 로 깔았으면 여기서
-        for m in models:
-            m.result()
         progress("Loading models", None)
         from Process.detect_ocr import get_rfdetr
         get_rfdetr()
@@ -217,8 +149,6 @@ def _run():
     except Exception as e:
         print(f"[setup] failed: {type(e).__name__}: {e}", flush=True)
         status.update(state="error", text=str(e)[:300], pct=None)
-    finally:
-        pool.shutdown(wait=False)
 
 
 def ready():
