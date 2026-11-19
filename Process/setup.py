@@ -7,6 +7,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from Process.update import current_version
 from Process.hayai import REPO as HAYAI_REPO, REV as HAYAI_REV, PROC_REPO, PROC_REV, PATTERNS as HAYAI_PATTERNS, PROC_PATTERNS
+from Process.sam_mask import REPO as SAM_REPO, REV as SAM_REV, PATTERNS as SAM_PATTERNS
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 PYTHON = os.path.join(ROOT, "python", "python.exe")
@@ -149,6 +150,7 @@ HF_MODELS = [
     ("mayocream/koharu-layout-rfdetr-seg-2xl-1152", ["model.safetensors"], None),  #RF-DETR
     (HAYAI_REPO, HAYAI_PATTERNS, HAYAI_REV),   #OCR
     (PROC_REPO, PROC_PATTERNS, PROC_REV), #HAYAI 전처리기
+    (SAM_REPO, SAM_PATTERNS, SAM_REV),   #사람이 그린 효과음 상자의 글자 마스크 (SAM 2.1, 약 900MB)
 ]
 
 

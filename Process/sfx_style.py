@@ -1,15 +1,11 @@
-#효과음 렌더: 색·굵기는 원본에서 재고, 글씨체·초성 배율·글자 크기는 models/sfx_ar.pt 가 정한다
+#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·글자 줄 기울기는 원본에서 재고, 글씨체는 models/sfx_ar.pt 가 정한다
 import os, math, threading
 import numpy as np, cv2
 from PIL import Image, ImageDraw, ImageFont
+from Process.inpaint import decode
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG = 224
-CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
-JUNG = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ"
-JONG = ["", "ㄱ", "ㄲ", "ㄳ", "ㄴ", "ㄵ", "ㄶ", "ㄷ", "ㄹ", "ㄺ", "ㄻ", "ㄼ", "ㄽ", "ㄾ", "ㄿ", "ㅀ", "ㅁ", "ㅂ", "ㅄ", "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ"]
-VERT_V = set("ㅏㅐㅑㅒㅓㅔㅕㅖㅣ")
-HORI_V = set("ㅗㅛㅜㅠㅡ")
 _lock = threading.Lock()
 _cache = {}
 
@@ -32,50 +28,8 @@ def stroke_width(mask):
     m = mask.astype(np.uint8)
     if m.sum() < 10:
         return 0.0
-    d = cv2.distanceTransform(m, cv2.DIST_L2, 3)
-    return float(4 * np.median(d[m > 0]))
-
-
-#글자(또는 자모)를 box_w×box_h 안에 비율 유지해 꽉 차게 그린 L 그림(여백 없음). 실제 잉크 영역 기준
-def glyph(path, text, box_w, box_h, stroke=0):
-    size = int(max(box_w, box_h) * 1.3) + 4
-    f = font(path, size)
-    bb = f.getbbox(text)
-    sw = int(round(stroke * 1.3))
-    pad = sw + size // 2 + 4
-    im = Image.new("L", (max(1, bb[2] - bb[0]) + 2 * pad, max(1, bb[3] - bb[1]) + 2 * pad), 0)
-    ImageDraw.Draw(im).text((pad - bb[0], pad - bb[1]), text, font=f, fill=255, stroke_width=sw, stroke_fill=255)
-    ink = im.getbbox()
-    if ink is None:
-        return Image.new("L", (max(1, int(box_w)), max(1, int(box_h))), 0)
-    im = im.crop(ink)
-    sc = min(box_w / im.width, box_h / im.height)
-    return im.resize((max(1, int(im.width * sc)), max(1, int(im.height * sc))), Image.BILINEAR)
-
-
-def paste_fit(canvas, im, box):
-    x1, y1, x2, y2 = [int(v) for v in box]
-    bw, bh = max(1, x2 - x1), max(1, y2 - y1)
-    s = min(bw / im.width, bh / im.height)
-    im = im.resize((max(1, int(im.width * s)), max(1, int(im.height * s))), Image.BILINEAR)
-    canvas.paste(im, (x1 + (bw - im.width) // 2, y1 + (bh - im.height) // 2), im)
-
-
-def fit_canvas(im, w, h):
-    canvas = Image.new("L", (w, h), 0)
-    paste_fit(canvas, im, (0, 0, w, h))
-    return canvas
-
-
-#칸을 채우게 가로·세로를 따로 늘린다. 한쪽만 STRETCH 배까지 (한글판 효과음도 글자를 길쭉하게 늘려 칸을 채운다)
-STRETCH = 1.4
-def fill_canvas(im, w, h):
-    s = min(w / im.width, h / im.height)
-    sx, sy = min(w / im.width, s * STRETCH), min(h / im.height, s * STRETCH)
-    im = im.resize((max(1, int(im.width * sx)), max(1, int(im.height * sy))), Image.BILINEAR)
-    canvas = Image.new("L", (w, h), 0)
-    canvas.paste(im, ((w - im.width) // 2, (h - im.height) // 2))
-    return canvas
+    d = cv2.distanceTransform(m, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)   # 정밀 거리 (3x3 근사는 값이 3.8·5.5·7.6 처럼 몇 단계로만 나온다)
+    return float(4 * d[m > 0].mean())   # 획 폭 w 의 거리 평균은 w/4
 
 
 SYMS = "♡♥!?"
@@ -85,91 +39,6 @@ def has_char(path, ch):
         from fontTools.ttLib import TTFont
         _cache[k] = set(TTFont(path, lazy=True).getBestCmap())
     return ord(ch) in _cache[k]
-
-
-#한 글자를 w×h L 그림으로. 초성 배율이 1 과 다르면 자모를 정사각형 칸에서 따로 그려 조립한다
-def char_mask(path, ch, w, h, cho_scale):
-    w, h = max(8, int(w)), max(8, int(h))
-    if not ("가" <= ch <= "힣"):
-        if not has_char(path, ch):   # ♡ 가 없는 폰트는 나눔고딕 것을 쓴다 (굵기는 뒤에서 맞춘다)
-            path = font_paths().get("NanumGothic", path)
-        return fit_canvas(glyph(path, ch, w, h), w, h)
-    code = ord(ch) - 0xAC00
-    cho, jung, jong = CHO[code // 588], JUNG[(code % 588) // 28], JONG[code % 28]
-    if abs(cho_scale - 1) < 0.15 or (jung not in VERT_V and jung not in HORI_V):
-        return fill_canvas(glyph(path, ch, w, h), w, h)
-    S = max(w, h)
-    canvas = Image.new("L", (S, S), 0)
-    cs = min(cho_scale, 2.5)
-    if jung in VERT_V:      # 초성 왼쪽, 중성 오른쪽, 종성 아래
-        ch_h = S * (0.62 if jong else 1.0)
-        cho_w, cho_h = min(S * 0.48 * cs, S * 0.78), min(ch_h * 0.62 * cs, S * (0.68 if jong else 0.9))
-        paste_fit(canvas, glyph(path, cho, cho_w, cho_h), (0, 0, cho_w, cho_h))
-        jx = S * 0.56
-        paste_fit(canvas, glyph(path, jung, max(8, S - jx), ch_h), (jx, 0, S, ch_h))
-        if jong:
-            paste_fit(canvas, glyph(path, jong, S * 0.8, S - ch_h - S * 0.03), (S * 0.1, ch_h + S * 0.03, S * 0.9, S))
-    else:                   # 초성 위, 중성 가운데, 종성 아래
-        top = S * (0.38 if jong else 0.5)
-        cho_w, cho_h = min(S * 0.5 * cs, S * 0.95), min(top * 0.75 * cs, S * (0.48 if jong else 0.6))
-        paste_fit(canvas, glyph(path, cho, cho_w, cho_h), ((S - cho_w) / 2, 0, (S + cho_w) / 2, cho_h))
-        mid_h = (S * 0.68 if jong else S) - cho_h
-        paste_fit(canvas, glyph(path, jung, S, max(8, mid_h)), (0, cho_h, S, cho_h + mid_h))
-        if jong:
-            paste_fit(canvas, glyph(path, jong, S * 0.8, S * 0.3), (S * 0.1, S * 0.7, S * 0.9, S))
-    ink = canvas.getbbox()
-    return fill_canvas(canvas.crop(ink) if ink else canvas, w, h)
-
-
-#획 굵기 맞추기: 목표보다 가늘면 두껍게, 굵으면 깎는다
-#획 굵기 맞추기. 가는 획이 사라지거나 구멍이 메워지지 않게 깎고 붙이는 양을 제한한다
-def match_thickness(mask_im, target_px):
-    m = np.array(mask_im) > 127
-    if m.sum() < 10:
-        return mask_im
-    cur = stroke_width(m)
-    k = int(round(abs(target_px - cur) / 2))
-    if target_px < cur:
-        d = cv2.distanceTransform(m.astype(np.uint8), cv2.DIST_L2, 3)
-        ridge = m & (d >= cv2.dilate(d, np.ones((3, 3), np.uint8)) - 1e-3) & (d >= 1)
-        thin = float(2 * np.percentile(d[ridge], 20)) if ridge.sum() > 10 else cur
-        k = min(k, int(0.25 * thin))
-    else:
-        k = min(k, max(1, int(cur)))   # 가는 폰트도 원본 굵기까지 (최대 3배)
-    if k < 1:
-        return mask_im
-    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1))
-    a = (m * 255).astype(np.uint8)
-    return Image.fromarray(cv2.dilate(a, ker) if target_px > cur else cv2.erode(a, ker))
-
-
-#lines: 글자 줄 목록. 글자별 상대 크기(size)는 모델 예측 (줄 안에서 비율로만 쓴다)
-def layout_lines(lines, chars_st, region, W, H):
-    x1, y1, x2, y2 = region[0] * W, region[1] * H, region[2] * W, region[3] * H
-    rw, rh = max(8, x2 - x1), max(8, y2 - y1)
-    vertical = rh > rw * 1.1 and max(len(l) for l in lines) > 1
-    L, k = len(lines), max(len(l) for l in lines)
-    along, across = (rh, rw) if vertical else (rw, rh)   # 줄 방향 길이, 줄 쌓는 방향 길이
-    cell = min(along / k, across / L)
-    line_gap = across / L
-    out, idx = [], 0
-    for li, line in enumerate(lines):
-        st = chars_st[idx:idx + len(line)]
-        sizes = np.array([float(np.clip(c.get("size", 1.0), 0.6, 1.6)) for c in st] + [1.0] * (len(line) - len(st)))
-        sizes = np.where([ch in SYMS for ch in line], 0.6, sizes)   # ♡·! 는 글자보다 작게
-        sizes = sizes / sizes.sum() * min(along, cell * len(line) * STRETCH)
-        pos = (along - sizes.sum()) / 2
-        off = (L - 1 - li if vertical else li) * line_gap + line_gap / 2   # 세로쓰기는 오른쪽 줄이 첫 줄
-        for ci, ch in enumerate(line):
-            c = dict(st[ci]) if ci < len(st) else dict(size=1.0, cho=1.0, angle=0.0)
-            s_ = sizes[ci]
-            w_, h_ = (min(line_gap, s_ * 1.1), s_ * 0.92) if vertical else (s_ * 0.92, min(line_gap, s_ * 1.1))
-            cx = (x1 + off) if vertical else (x1 + pos + s_ / 2)
-            cy = (y1 + pos + s_ / 2) if vertical else (y1 + off)
-            out.append(dict(c, ch=ch, cx=cx / W, cy=cy / H, w=w_ / W, h=h_ / H))
-            pos += s_
-        idx += len(line)
-    return out
 
 
 #번역문을 줄로 나눈다: 띄어쓰기가 있으면 그대로 줄, 없으면 영역 비율에 맞게 k 글자씩 (한 줄에 최대 6)
@@ -198,179 +67,247 @@ def split_lines(text, region, W, H):
     return [chars[i:i + best_k] for i in range(0, n, best_k)]
 
 
-def render_crop(bg, lines, st, region):
+EM = 240            # 글자를 이 크기(폰트 px)로 그려 조립한 뒤 상자에 맞게 줄인다
+SMALL = 0.85        # 둘째 글자부터 크기 기본값 (첫 글자 대비). 효과음은 첫 글자가 크다. 상자에 small 이 있으면 그 값
+SYM = 0.5           # ♡·!·? 크기
+SHIFT = (0.0, 0.16)  # 첫 글자·나머지 글자를 옆으로 어긋나게 (EM 대비, 세로쓰기면 + 가 오른쪽)
+GAP = 0.0           # 글자 사이 (EM 대비). 손 렌더와 비교해 0 이 가장 비슷
+SYM_GAP = 0.08      # ♡ 앞은 띄운다 (붙으면 작게 줄였을 때 「아♡」가 「앙」처럼 보인다)
+STRETCH = 1.0       # 상자를 채우려고 한쪽으로 늘리는 한도 (1 = 비율 유지. 11-12 손 렌더와 비교해 가장 비슷)
+HALO = 0.6          # 그림 위 글자에 두르는 테두리 굵기 (원본 획 굵기 대비)
+HEART_FONT = r"C:\Windows\Fonts\malgun.ttf"   # ♡ 는 폰트마다 모양이 달라서 하나로
+
+
+def crop_ink(a):
+    ys, xs = np.nonzero(a > 8)
+    return a[ys.min():ys.max() + 1, xs.min():xs.max() + 1] if len(xs) else a
+
+
+#글자 하나를 EM 크기로 그려 잉크만 잘라낸 L 그림
+def glyph(path, ch):
+    if ch in "♡♥" and os.path.exists(HEART_FONT):
+        path = HEART_FONT
+    elif not ("가" <= ch <= "힣") and not has_char(path, ch):   # 폰트에 없는 기호는 나눔고딕 것
+        path = font_paths().get("NanumGothic", path)
+    im = Image.new("L", (EM * 2, EM * 2), 0)
+    ImageDraw.Draw(im).text((EM // 2, EM // 3), ch, font=font(path, EM), fill=255)
+    return crop_ink(np.array(im))
+
+
+def paste_max(dst, src, x, y):
+    h, w = src.shape
+    x0, y0, x1, y1 = max(0, x), max(0, y), min(dst.shape[1], x + w), min(dst.shape[0], y + h)
+    if x1 > x0 and y1 > y0:
+        np.maximum(dst[y0:y1, x0:x1], src[y0 - y:y1 - y, x0 - x:x1 - x], out=dst[y0:y1, x0:x1])
+
+
+#글자 줄들을 한 덩어리(L)로. 세로쓰기는 첫 줄이 오른쪽. 길이는 (줄 방향, 옆 방향) 으로 다뤄 가로·세로를 같은 코드로
+def text_block(path, lines, vertical, small=SMALL):
+    size = lambda a: a.shape if vertical else a.shape[::-1]
+    empty = lambda along, across: np.zeros((along, across) if vertical else (across, along), np.uint8)
+    put = lambda dst, src, along, across: paste_max(dst, src, across, along) if vertical else paste_max(dst, src, along, across)
+    blocks = []
+    for line in lines:
+        cells = []
+        for i, ch in enumerate(line):
+            g, k = glyph(path, ch), SYM if ch in SYMS else 1.0 if i == 0 else small
+            cells.append(cv2.resize(g, (max(1, int(g.shape[1] * k)), max(1, int(g.shape[0] * k))), interpolation=cv2.INTER_AREA))
+        across = max(size(c)[1] for c in cells) + EM
+        gaps = [0] + [(SYM_GAP if ch in SYMS else GAP) * EM for ch in line[1:]]
+        a = empty(int(sum(size(c)[0] for c in cells) + sum(gaps)) + EM, across)
+        pos = EM / 2
+        for i, c in enumerate(cells):
+            pos += gaps[i]
+            off = SHIFT[min(i, 1)] * EM if len(cells) > 1 else 0
+            put(a, c, int(pos), int((across - size(c)[1]) / 2 + off))
+            pos += size(c)[0]
+        blocks.append(crop_ink(a))
+    if vertical:
+        blocks = blocks[::-1]
+    sep = int(EM * 0.15)
+    out = empty(max(size(b)[0] for b in blocks), sum(size(b)[1] for b in blocks) + sep * (len(blocks) - 1))
+    pos = 0
+    for b in blocks:
+        put(out, b, 0, pos)
+        pos += size(b)[1] + sep
+    return out
+
+
+#늘이기(stretch: 세로/가로 비율, 1 보다 크면 길쭉하게), 기울이기(skew: 글자 모양을 비스듬히, 음수면 위가 오른쪽), 회전(줄 전체를 돌림, 반시계 +)
+def shear_rotate(a, skew, rot, stretch=1.0):
+    if abs(stretch - 1) > 0.01:
+        r = math.sqrt(stretch)
+        a = cv2.resize(a, (max(1, int(a.shape[1] / r)), max(1, int(a.shape[0] * r))), interpolation=cv2.INTER_LINEAR)
+    a = np.pad(a, EM)
+    h, w = a.shape
+    if skew:
+        a = cv2.warpAffine(a, np.float32([[1, skew, -skew * h / 2], [0, 1, 0]]), (w, h), flags=cv2.INTER_LINEAR)
+    if abs(rot) > 0.5:
+        a = np.array(Image.fromarray(a).rotate(rot, resample=Image.BICUBIC, expand=True))
+    return crop_ink(a)
+
+
+#상자에 맞게 줄이고, 남는 쪽은 STRETCH 배까지 늘려 채운다
+def fit_region(a, rw, rh):
+    h, w = a.shape
+    s = min(rw / w, rh / h)
+    sx, sy = min(rw / w, s * STRETCH), min(rh / h, s * STRETCH)
+    return cv2.resize(a, (max(1, int(w * sx)), max(1, int(h * sy))), interpolation=cv2.INTER_AREA)
+
+
+def grow(m, px):
+    k = int(round(px))
+    if k <= 0:
+        return m
+    return cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
+
+
+def rgb(v):
+    return tuple(int(np.clip(x, 0, 1) * 255) for x in v)
+
+
+def lum(c):
+    return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+
+
+#st: font·skew·small·stretch·rotate·color·outline·outline_w·thick. region: 상자 안 글자 자리(0~1)
+def render_box(bg, lines, st, region):
     H, W = bg.shape[:2]
-    lay = layout_lines(lines, st["chars"], region, W, H)
-    chars = [c["ch"] for c in lay]
-    path = font_paths()[st["font"]]
-    color = tuple(int(np.clip(v, 0, 1) * 255) for v in st["color"])
-    out_c = None if st["outline"] is None else tuple(int(np.clip(v, 0, 1) * 255) for v in st["outline"])
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    for ch, c in zip(chars, lay):
-        cw, chh = max(8, c["w"] * W), max(8, c["h"] * H)
-        thick = st["thick_px"]
-        ow = int(round(st["outline_w"] * max(thick, 1))) if out_c else 0
-        fill = match_thickness(char_mask(path, ch, cw, chh, c.get("cho", 1.0)), thick)
-        tile = Image.new("RGBA", fill.size, (0, 0, 0, 0))
-        oc = out_c
-        tx, ty = int(c["cx"] * W - fill.width / 2), int(c["cy"] * H - fill.height / 2)
-        under = bg[max(0, ty):max(0, ty) + fill.height, max(0, tx):max(0, tx) + fill.width]
-        fm = (np.array(fill) > 127)[:under.shape[0], :under.shape[1]]
-        if fm.sum() > 20:
-            lum = lambda rgb: 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-            bl = lum(under[fm].astype(np.float32))
-            fl = float(lum(np.array(color, np.float32)))
-            hidden = np.abs(bl - fl) < 60
-            if oc is not None:
-                hidden &= np.abs(bl - float(lum(np.array(oc, np.float32)))) < 60
-            if hidden.mean() > 0.3:
-                oc = (0, 0, 0) if fl > 127 else (255, 255, 255)
-                ow = max(ow, 2, int(round(thick * 0.3)))
-        out_c_ = oc
-        if ow > 0 and out_c_ is not None:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ow + 1, 2 * ow + 1))
-            tile.paste(Image.new("RGBA", fill.size, out_c_ + (255,)), (0, 0), Image.fromarray(cv2.dilate(np.array(fill), k)))
-        tile.paste(Image.new("RGBA", fill.size, color + (255,)), (0, 0), fill)
-        if abs(st.get("shear", 0)) >= 5:
-            k = math.tan(math.radians(st["shear"]))
-            M = np.float32([[1, k, -k * tile.height / 2 + abs(k) * tile.height / 2], [0, 1, 0]])
-            tile = Image.fromarray(cv2.warpAffine(np.array(tile), M, (int(tile.width + abs(k) * tile.height), tile.height), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0, 0)))
-        if abs(c.get("angle", 0)) > 3:
-            tile = tile.rotate(c["angle"], expand=True, resample=Image.BILINEAR)
-        layer.alpha_composite(tile, (int(c["cx"] * W - tile.width / 2), int(c["cy"] * H - tile.height / 2)))
-    out = Image.fromarray(bg).convert("RGBA")
-    out.alpha_composite(layer)
-    return np.array(out.convert("RGB"))
+    x1, y1, x2, y2 = region[0] * W, region[1] * H, region[2] * W, region[3] * H
+    rw, rh = max(8, x2 - x1), max(8, y2 - y1)
+    vertical = rh > rw * 1.1 and max(len(l) for l in lines) > 1
+    m = text_block(font_paths()[st["font"]], lines, vertical, st["small"])
+    m = shear_rotate(m, st["skew"], st["rotate"], st["stretch"])
+    m = fit_region(m, rw, rh)
+    thick = max(st["thick"], 1.0)
+    cur = stroke_width(m > 127)   # 획 굵기를 원본에 맞춘다 (가는 획이 사라지지 않게 깎는 건 획의 1/4 까지)
+    k = (thick - cur) / 2
+    m = grow(m, k) if k >= 0.5 else cv2.erode(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * int(min(-k, cur / 4)) + 1,) * 2)) if k <= -0.5 else m
+    color = rgb(st["color"])
+    m = np.pad(m, int(thick * 2.5) + 4)   # 테두리를 키울 자리
+    layers = []   # 바깥부터 (마스크, 색)
+    out_c, ow = (rgb(st["outline"]), st["outline_w"] * thick) if st["outline"] is not None else (None, 0)
+    if out_c is None:   # 테두리를 못 쟀는데 바탕이 그림이면(평평하지 않거나 글자색과 비슷하면) 반대색 테두리로 글자를 띄운다
+        L = lum(bg[int(y1):int(y2), int(x1):int(x2)].reshape(-1, 3).astype(np.float32).T)
+        if L.size and (L.std() > 25 or abs(L.mean() - lum(color)) < 90):
+            out_c, ow = ((0, 0, 0) if lum(color) > 127 else (255, 255, 255)), max(3, thick * HALO)
+    if out_c is not None and ow >= 1:
+        layers.append((grow(m, ow), out_c))
+    layers.append((m, color))
+    out = Image.fromarray(bg).convert("RGB")
+    px, py = int((x1 + x2) / 2 - m.shape[1] / 2), int((y1 + y2) / 2 - m.shape[0] / 2)
+    for mask, c in layers:
+        out.paste(c, (px, py), Image.fromarray(mask))
+    return np.array(out)
 
 
-def measure(jp, bg):
-    jp = np.asarray(jp)
-    d = np.abs(jp.astype(np.int16) - bg.astype(np.int16)).sum(2) > 60
+#원본과 지운 그림이 다른 곳 = 지운 글자
+def diff_mask(jp, bg):
+    d = np.abs(np.asarray(jp).astype(np.int16) - np.asarray(bg).astype(np.int16)).sum(2) > 60
     d = cv2.morphologyEx(d.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    d = cv2.morphologyEx(d, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
-    if d.sum() < 100:
-        return None
-    region = cv2.dilate(d.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
-    px = jp[region].astype(np.float32)
-    K = 3
-    _, lab, cen = cv2.kmeans(px, K, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0), 3, cv2.KMEANS_PP_CENTERS)
-    labimg = np.full(d.shape, -1, np.int32)
-    labimg[region] = lab.ravel()
-    inside = [((labimg == c) & d).sum() / max(((labimg == c) & region).sum(), 1) for c in range(K)]
-    bg_c = int(np.argmin(inside))
-    dd = cv2.distanceTransform(d.astype(np.uint8), cv2.DIST_L2, 3)
-    cand = [c for c in range(K) if c != bg_c]
-    depth = [dd[(labimg == c) & d].mean() if ((labimg == c) & d).sum() > 20 else -1 for c in cand]
-    fill_c = cand[int(np.argmax(depth))]
-    other = cand[1 - int(np.argmax(depth))]
-    fill = (labimg == fill_c) & region
-    fill = cv2.morphologyEx(fill.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8)) > 0
-    n_, lab_, _, _ = cv2.connectedComponentsWithStats(fill.astype(np.uint8), 8)
-    if n_ > 1:   # 차이 마스크에 걸친 덩어리만 글자
-        keep = np.concatenate([[False], np.bincount(lab_[d], minlength=n_)[1:] > 0])
-        if keep.any():
-            fill = keep[lab_]
+    return cv2.morphologyEx(d, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
+
+
+#대사와 같은 방식으로 잰다 (detect_ocr.enclosed_colors, 11-15 결정): 글자 상자 안에서 갇힌 색 = 글자색, 가둔 색 = 테두리색, 가둔 벽의 두께 = 테두리 굵기.
+#글자 마스크는 SAM 2.1 둘째 후보. 획 굵기는 글자색으로 본 픽셀로 잰다. page: 페이지(PIL, RGB), pos: 글자 상자
+def measure(page, pos):
+    from Process import sam_mask
+    from Process.detect_ocr import enclosed_colors
+    area, masks, _ = sam_mask.candidates(page, pos)
+    glyphs = np.zeros((page.height, page.width), bool)
+    glyphs[area[1]:area[3], area[0]:area[2]] = masks[1]
+    color, outline, width, fill = enclosed_colors(np.asarray(page), pos, glyphs)
     if fill.sum() < 50:
         return None
     thick = stroke_width(fill)
-    ring = (cv2.dilate(fill.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & ~fill & (labimg != fill_c) & region
-    outline, ow = None, 0
-    if ring.sum() > 20 and (labimg[ring] == other).mean() > 0.5 and inside[other] > 0.5:
-        outline = cen[other]
-        cur = fill.astype(np.uint8)
-        top = max(2, int(thick * 0.6))
-        for w in range(1, top + 1):
-            nxt = cv2.dilate(cur, np.ones((3, 3), np.uint8))
-            band = (nxt > 0) & (cur == 0) & (labimg != fill_c)
-            if band.sum() < 10 or (labimg[band] == other).mean() < 0.45:
-                break
-            ow, cur = w, nxt
-        #"테두리"가 글자 획만큼 두꺼우면 어느 쪽이 글자인지 애매하다 → 어두운 쪽을 글자로 (흰 테두리 두른 검은 글씨가 흰 글씨로 뒤집혀 잡히던 것)
-        if ow == top and cen[other].mean() < cen[fill_c].mean():
-            fill_c, other = other, fill_c
-            outline, ow = cen[other], 0.4 * thick
-    return dict(color=[float(v) / 255 for v in cen[fill_c]], outline=None if outline is None else [float(v) / 255 for v in outline],
-                outline_w=ow / max(thick, 1), thick=thick)
+    unit = lambda h: [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    return dict(tilt=0.0, area=int(fill.sum()), color=unit(color), outline=None if outline is None else unit(outline),
+                outline_w=(width or 0) / max(thick, 1), thick=thick)
 
 
-#  글씨체 → 폰트·흔들림은 아래 STYLE_FONT 표. 색·테두리·굵기는 measure() 가 조각에서 잰다
+#글자 줄의 기울기(도). 세로축 기준, + 면 아래가 오른쪽. 덩어리가 길쭉하지 않으면(글자 하나 등) 방향이 없어 0
+def tilt(d):
+    ys, xs = np.nonzero(d)
+    if len(xs) < 50:
+        return 0.0
+    val, vec = np.linalg.eigh(np.cov(np.stack([xs - xs.mean(), ys - ys.mean()])))
+    if val[1] < 3.0 * max(val[0], 1e-6):   # 긴 축이 짧은 축의 √3 배 미만
+        return 0.0
+    vx, vy = vec[:, 1]
+    if vy < 0:
+        vx, vy = -vx, -vy
+    a = math.degrees(math.atan2(vx, vy))
+    if abs(a) > 45:   # 가로로 긴 줄: 가로축 기준 (+ 면 오른쪽 끝이 위)
+        a = a - 90 if a > 0 else a + 90
+    return float(np.clip(a, -30, 30))
+
+
+#글자 마스크를 감싸는 가장 작은 직사각형(cv2.minAreaRect): (가운데 x, 가운데 y, 가로, 세로, 기울기)
+#기울기 부호는 tilt 와 같다 (세로축 기준, + 면 아래가 오른쪽). 글자 하나짜리도 잴 수 있다. 깨끗한 글자 마스크(SAM 2.1)가 있을 때만 쓴다
+def min_rect(mask):
+    ys, xs = np.nonzero(mask)
+    rect = cv2.minAreaRect(np.stack([xs, ys], 1).astype(np.float32))
+    box = cv2.boxPoints(rect)
+    e1, e2 = box[1] - box[0], box[2] - box[1]
+    v, h = (e1, e2) if abs(e1[1]) > abs(e1[0]) else (e2, e1)   # 세로에 가까운 변, 가로에 가까운 변
+    if v[1] < 0:
+        v = -v
+    return rect[0][0], rect[0][1], float(np.hypot(*h)), float(np.hypot(*v)), float(np.clip(math.degrees(math.atan2(v[0], v[1])), -30, 30))
+
+
+#글자를 직사각형 가운데에 놓고, 돌린 채로 같은 배율로 키우다가 직사각형에 닿으면 멈춘다 → 그렇게 그려질 자리(0~1, W×H 조각 기준)
+def rect_region(rect, lines, st, W, H):
+    cx, cy, rw, rh, _ = rect
+    vertical = rh > rw * 1.1 and max(len(l) for l in lines) > 1
+    g = text_block(font_paths()[st["font"]], lines, vertical, st["small"])
+    flat, turned = shear_rotate(g, st["skew"], 0, st["stretch"]), shear_rotate(g, st["skew"], st["rotate"], st["stretch"])
+    k = min(rw / flat.shape[1], rh / flat.shape[0])   # 늘이기·기울이기까지 한 모양이 직사각형에 먼저 닿는 쪽
+    bw, bh = turned.shape[1] * k, turned.shape[0] * k
+    return (cx - bw / 2) / W, (cy - bh / 2) / H, (cx + bw / 2) / W, (cy + bh / 2) / H
+
+
+#글씨체 → (폰트, 기울이기). 기울이기는 모델이 아직 안 내서 글씨체별 기본값 (음수면 위가 오른쪽으로 비스듬히).
+#brush_hand 는 Nanum Brush Script 가 너무 가늘어서 East Sea Dokdo (11-12 33페이지 손 렌더 비교)
 STYLE_FONT = {
-    "marker_hand": ("Dokdo", 2), "pen_hand": ("Nanum Pen", 2), "brush_font": ("East Sea Dokdo", 0), "brush_slant": ("Kirang Haerang", 0),
-    "marker_font": ("Jua", 0), "brush_hand": ("Nanum Brush Script", 2), "round_hand": ("Gaegu", 1), "bold_hand": ("Black Han Sans", 1), "gothic_font": ("NanumGothic", 0),
+    "marker_hand": ("Dokdo", -0.15), "pen_hand": ("Nanum Pen", -0.1), "brush_font": ("East Sea Dokdo", -0.25), "brush_slant": ("Kirang Haerang", -0.2),
+    "marker_font": ("Jua", -0.1), "brush_hand": ("East Sea Dokdo", -0.2), "round_hand": ("Gaegu", 0.0), "bold_hand": ("Black Han Sans", -0.1), "gothic_font": ("NanumGothic", 0.0),
 }
 MODEL_PATH = os.environ.get("SFX_STYLE_MODEL") or os.path.join(ROOT, "models", "sfx_ar.pt")
 
 
+#글씨체만 쓴다: 모델의 그림 인코더(ResNet18)와 글씨체 머리만 만들고, 글자별 값을 내는 디코더 가중치는 읽지 않는다
 def _net():
     if "net" not in _cache:
         import torch, torch.nn as nn, torchvision
         ck = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
-        STYLES, CK, MAXC = ck["styles"], ck["char_keys"], ck["maxc"]
 
         class Net(nn.Module):
-            def __init__(self, d=256):
+            def __init__(self, n_styles, d=256):
                 super().__init__()
-                bb = torchvision.models.resnet18(weights=None)
-                bb.fc = nn.Identity()
-                self.bb = bb
+                self.bb = torchvision.models.resnet18(weights=None)
+                self.bb.fc = nn.Identity()
                 self.ctx = nn.Sequential(nn.Linear(512 + 1, d), nn.ReLU())
-                self.style = nn.Linear(d, len(STYLES))
-                self.style_emb = nn.Embedding(len(STYLES), d)
-                self.char_emb = nn.Embedding(11173, d)
-                self.prev_proj = nn.Linear(len(CK), d)
-                self.pos = nn.Parameter(torch.zeros(MAXC, d))
-                layer = nn.TransformerEncoderLayer(d, 4, d * 2, dropout=0.1, batch_first=True)
-                self.dec = nn.TransformerEncoder(layer, 3)
-                self.head = nn.Linear(d, len(CK))
-                self.start = nn.Parameter(torch.zeros(len(CK)))
+                self.style = nn.Linear(d, n_styles)
 
-            def decode(self, ctx, sid, ids, prev):
-                tok = self.char_emb(ids) + self.prev_proj(prev) + self.pos[None] + ctx[:, None] + self.style_emb(sid)[:, None]
-                mask = torch.triu(torch.ones(MAXC, MAXC, device=ids.device, dtype=torch.bool), 1)
-                return self.head(self.dec(tok, mask=mask))
-
-            @torch.no_grad()
-            def generate(self, x, asp, ids, n):
-                ctx = self.ctx(torch.cat([self.bb(x), asp], 1))
-                sid = self.style(ctx).argmax(1)
-                prev = self.start[None, None].expand(len(ids), MAXC, -1).clone()
-                out = torch.zeros(len(ids), MAXC, len(CK))
-                for k in range(n):
-                    o = self.decode(ctx, sid, ids, prev)[:, k]
-                    out[:, k] = o
-                    if k + 1 < MAXC:
-                        prev[:, k + 1] = o
-                return sid, out
-
-        net = Net().eval()
-        net.load_state_dict(ck["state"])
-        _cache["net"] = (net, STYLES, CK, MAXC)
+        net = Net(len(ck["styles"])).eval()
+        net.load_state_dict({k: v for k, v in ck["state"].items() if k.split(".")[0] in ("bb", "ctx", "style")})
+        _cache["net"] = (net, ck["styles"])
     return _cache["net"]
 
 
-def predict(jp_im, chars):
-    """jp_im: PIL 일본어 조각, chars: 한글 글자 목록 → (style, [{size, angle, cho, dx, dy}])"""
+#일본어 조각 → 글씨체 (STYLE_FONT 의 키)
+def predict(jp_im):
     import torch
-    net, STYLES, CK, MAXC = _net()
+    net, styles = _net()
     w, h = jp_im.size
     s = IMG / max(w, h)
     im = jp_im.resize((max(1, round(w * s)), max(1, round(h * s))), Image.BILINEAR)
     canvas = Image.new("RGB", (IMG, IMG), (128, 128, 128))
     canvas.paste(im, ((IMG - im.width) // 2, (IMG - im.height) // 2))
     x = (torch.from_numpy(np.asarray(canvas).astype(np.float32) / 255).permute(2, 0, 1) - 0.5) / 0.5
-    ids = torch.zeros(1, MAXC, dtype=torch.long)
-    n = min(len(chars), MAXC)
-    for k, ch in enumerate(chars[:n]):
-        ids[0, k] = ord(ch) - 0xAC00 + 1 if "가" <= ch <= "힣" else 0
-    sid, out = net.generate(x[None], torch.tensor([[math.log(w / h)]], dtype=torch.float32), ids, n)
-    rows = [dict(zip(CK, r)) for r in out[0, :n].tolist()]
-    res = []
-    for ch, r in zip(chars[:n], rows):
-        cho = float(np.clip(r["cho"], 0.9, 2.0))
-        if not ("가" <= ch <= "힣") or CHO[(ord(ch) - 0xAC00) // 588] not in "ㅇㅎㄱㅈㅊㅋ":   # 과장은 둥근·열린 초성에만 (라벨 규칙과 같게)
-            cho = 1.0
-        res.append(dict(size=float(np.clip(r["size"], 0.5, 2.0)), angle=float(np.clip(r["angle"] * 45, -30, 30)), cho=cho))
-    return STYLES[int(sid[0])], res
+    with torch.no_grad():
+        ctx = net.ctx(torch.cat([net.bb(x[None]), torch.tensor([[math.log(w / h)]], dtype=torch.float32)], 1))
+        return styles[int(net.style(ctx).argmax(1)[0])]
 
 
 _SMALL = str.maketrans("ぁぃぅぇぉゃゅょゎ", "あいうえおやゆよわ")
@@ -438,10 +375,11 @@ def dedup(contents, textmask=None):
 
 
 def render_page(original, erased, contents):
-    """original·erased: PIL 페이지. contents: [{pos, mask_area?, translated, font?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
-    폰트는 페이지에 하나: 한 페이지의 효과음은 한 사람이 같은 펜으로 쓴 것이라, 전체 굵기 중앙값으로 하나를 정한다
-    (상자마다 고르면 작은 상자는 굵은 폰트, 큰 상자는 얇은 폰트로 갈려서 제각각이 된다). 색·테두리·굵기는 상자마다 잰 대로. 상자에 font 가 지정돼 있으면 그걸 쓴다"""
-    src = np.array(original.convert("RGB"))
+    """original·erased: PIL 페이지. contents: [{pos, mask_area?, word, translated, group?, letter?, mask?, font?, skew?, small?, stretch?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
+    모델 몫 4개(폰트·기울이기·둘째 글자부터 크기 small·늘이기 stretch)는 상자에 있으면 그 값. 획 굵기는 원본에 맞춘다, 없으면 모델이 고른 글씨체의 기본값. 이은 상자(group 이 같음)는 가장 크게 잰 상자의
+    글씨체만 같이 쓰고 나머지는 상자마다 따로. 회전은 원본 글자 줄의 기울기 그대로 (기울이기는 글자 모양만 바꾸고 회전에는 안 쓴다). 글자 마스크가 있으면 회전·크기를 그걸 감싸는 가장 작은 직사각형으로: 그 기울기로 돌리고, 그 안에서 키우다 닿으면 멈춘다"""
+    page = original.convert("RGB")
+    src = np.array(page)
     out = np.array(erased.convert("RGB"))
     H, W = out.shape[:2]
     items = []
@@ -455,26 +393,45 @@ def render_page(original, erased, contents):
             cw, ch_ = bx2 - bx1, by2 - by1
             region = ((px1 - bx1) / cw, (py1 - by1) / ch_, (px2 - bx1) / cw, (py2 - by1) / ch_)
             lines = split_lines(c["translated"], region, cw, ch_)
-            n = sum(len(l) for l in lines)
-            if not n:
+            if not sum(len(l) for l in lines):
                 continue
             jp = src[by1:by2, bx1:bx2]
-            m = measure(jp, out[by1:by2, bx1:bx2])
+            letter = None
+            if c.get("letter") and c.get("mask") and c.get("mask_area"):   # 사람이 그린 효과음 상자: SAM 2.1 글자 마스크로 잰다 (mask 는 mask_area 크기)
+                ax1, ay1 = int(c["mask_area"][0]), int(c["mask_area"][1])
+                k = decode(c["mask"])
+                letter = np.zeros(jp.shape[:2], bool)
+                letter[ay1 - by1:ay1 - by1 + k.shape[0], ax1 - bx1:ax1 - bx1 + k.shape[1]] = k
+                if letter.sum() < 50:
+                    letter = None
+            m = measure(page, (max(0, px1), max(0, py1), min(W, px2), min(H, py2)))   # 색·테두리·굵기는 대사와 같은 방식으로 (글자 상자 기준)
             if m is None:
                 continue
-            flat = [ch for line in lines for ch in line]
-            style, pred = predict(Image.fromarray(jp), flat)
-            st = dict(color=m["color"], outline=m["outline"], outline_w=m["outline_w"], thick_px=m["thick"], shear=0.0, chars=pred)
-            items.append(dict(box=(bx1, by1, bx2, by2), region=region, lines=lines, st=st, style=style, font=c.get("font")))
-        #페이지 폰트 하나: 글씨체 다수결 (한 페이지 효과음은 같은 펜). 상자에 font 가 지정돼 있으면 그걸 쓴다
-        if items:
-            from collections import Counter
-            page_style = Counter(it["style"] for it in items).most_common(1)[0][0]
-            page_font = STYLE_FONT[page_style][0]
-            if page_font not in font_paths():
-                page_font = "Dokdo"
-            for it in items:
-                it["st"]["font"] = it["font"] if it["font"] in font_paths() else page_font
-                bx1, by1, bx2, by2 = it["box"]
-                out[by1:by2, bx1:bx2] = render_crop(out[by1:by2, bx1:bx2], it["lines"], it["st"], it["region"])
+            style = predict(Image.fromarray(jp))
+            #기울기는 글자 상자(pos) 안의 지운 어두운 잉크로 잰다 (지운 영역 mask_area 는 넓어서 옆 그림 선까지 걸리고, 흰 테두리는 방향을 흐린다)
+            pj = src[max(0, py1):py2, max(0, px1):px2]
+            rect = None if letter is None else min_rect(letter)   # 글자 마스크가 있으면 회전·크기를 그걸 감싸는 직사각형으로 정한다
+            m["tilt"] = tilt(diff_mask(pj, out[max(0, py1):py2, max(0, px1):px2]) & (pj.mean(2) < 100)) if rect is None else rect[4]
+            items.append(dict(box=(bx1, by1, bx2, by2), region=region, lines=lines, m=m, style=style, c=c, group=c.get("group"), rect=rect))
+        for it in items:   # 글씨체: 상자 값 > 모델이 고른 것
+            name, it["skew"] = STYLE_FONT[it["style"]]
+            c = it["c"]
+            it["font"] = c["font"] if c.get("font") in font_paths() else name if name in font_paths() else "Dokdo"
+        groups = {}
+        for it in items:
+            if it["group"] is not None:
+                groups.setdefault(it["group"], []).append(it)
+        for g in groups.values():   # 이은 상자는 글씨체만 같게 (가장 크게 잰 상자 것). 나머지는 다른 글자 줄처럼 상자마다 따로
+            lead = max(g, key=lambda it: it["m"]["area"])
+            for it in g:
+                it["font"] = lead["font"]
+        for it in items:
+            m = it["m"]
+            c = it["c"]
+            skew = float(c.get("skew", it["skew"]))
+            st = dict(font=it["font"], skew=skew, small=float(c.get("small", SMALL)), stretch=float(c.get("stretch", 1.0)), rotate=m["tilt"], color=m["color"], outline=m["outline"],
+                      outline_w=m["outline_w"], thick=m["thick"])
+            bx1, by1, bx2, by2 = it["box"]
+            region = rect_region(it["rect"], it["lines"], st, bx2 - bx1, by2 - by1) if it["rect"] else it["region"]
+            out[by1:by2, bx1:bx2] = render_box(out[by1:by2, bx1:bx2], it["lines"], st, region)
     return Image.fromarray(out)

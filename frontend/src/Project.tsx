@@ -31,6 +31,7 @@ export type Content = {
   font_size?: number; //원본 글자 크기(px)
   angle?: number; //원본 줄의 기울기(도, 시계 방향 +). 렌더 때 이만큼 돌려서 찍는다
   user?: boolean; //＋ 로 직접 그린 상자. DETECT 를 다시 해도 남는다
+  letter?: boolean; //mask 가 SAM 2.1 이 준 글자 모양 그대로다 (직접 그린 효과음 상자). 효과음 렌더가 이 마스크로 잰다
   group?: number; //사용자가 이은 상자 묶음 번호. 떨어진 글자를 한 단어로 읽고 번역한다
   order?: number; //묶음 안 순서 (1 부터). 이 순서대로 이어 붙여 읽는다
   groupText?: string; //묶음 전체 번역문 (첫 상자에만). 이걸 글자 수대로 나눠 각 상자 translated 에 넣는다
@@ -38,7 +39,9 @@ export type Content = {
   font?: string; //이 상자만 쓸 폰트(family). 없으면 설정의 폰트
   size?: number; //이 상자만 쓸 글자 크기(px). 없으면 영역에 맞춰 자동
   color?: string; //글자색
-  stroke?: string | null; //테두리색 (밝은 글자일 때)
+  stroke?: string | null; //테두리색 (원본 글자에 테두리가 있을 때)
+  stroke_width?: number | null; //원본 테두리 굵기(px). 없으면 글자 크기의 1/12 로 그린다
+  thick?: number; //원본 획 굵기(px). 번역문 획을 이 굵기에 맞춘다
 };
 
 //폰트 선택지. regular/bold 는 백엔드 /fontfiles/ 아래 상대 경로 (없으면 시스템 폰트)
@@ -136,7 +139,7 @@ const post_pair = async (path: string, page: string, erased: string, contents: P
   return URL.createObjectURL(await r.blob());
 };
 const post_sfx = (page: string, erased: string, contents: Content[]) =>
-  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, translated }) => ({ pos, mask_area, word, translated })));
+  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, translated, group, letter, mask }) => ({ pos, mask_area, word, translated, group, letter, mask: letter ? mask : undefined })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
 
 export function Project({
   project,

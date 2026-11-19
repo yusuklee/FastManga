@@ -186,23 +186,36 @@ def ocr_boxes(image, boxes, ocr="hayai"):
                 continue
             word = ""
         ex1, ey1, ex2, ey2 = erase
-        color, stroke = text_colors(arr, page_mask, pos)   # 지우기 상자(erase)는 옆 글자 획까지 끌어안을 수 있어 원래 상자에서 잰다
+        mask, letter = page_mask[ey1:ey2, ex1:ex2], False
+        from Process import sam_mask
+        from Process.sfx_style import stroke_width
+        if b.get("user") and b.get("sfx"):   # 사람이 그린 효과음 상자: 글자 마스크를 SAM 2.1 로 (탐지기가 못 잡은 큰 효과음은 comic-text-detector 마스크도 조각난다)
+            (erase, mask), letter = sam_mask.letter_mask(image, pos), True
+        # 글자색·테두리(대사·효과음 같은 방식)와 대사 글자 크기는 SAM 2.1 둘째 후보 마스크로 정한다 (11-15 결정). 크기를 못 재면 예전 방식(글자 줄 굵기)
+        area, masks, _ = sam_mask.candidates(image, pos)
+        glyphs = np.zeros(arr.shape[:2], bool)
+        glyphs[area[1]:area[3], area[0]:area[2]] = masks[1]
+        color, stroke, stroke_w, glyph = enclosed_colors(arr, pos, glyphs)
+        size = 0 if b.get("sfx") else sam_mask.text_size(masks[1], len("".join(word.split())))
         lines.append({
             **({"id": b["id"]} if "id" in b else {}),
             "pos": pos,
             "mask_area": erase,
             "word": word,
             "page": 1,
-            "mask": mask_to_text(page_mask[ey1:ey2, ex1:ex2]),
+            "mask": mask_to_text(mask),
             "bubble": b.get("bubble"),
             **({"bubble_area": b["bubble_area"], "bubble_mask": b["bubble_mask"]} if b.get("bubble_mask") else {}),
             **({"user": True} if b.get("user") else {}),
+            **({"letter": True} if letter else {}),   # mask 가 글자 모양 그대로(선+속)다 → 효과음 렌더가 이 마스크로 색·굵기·기울기를 잰다
             **({"sfx": True} if b.get("sfx") else {}),
             **({"group": b["group"], "order": b.get("order")} if b.get("group") is not None else {}),
-            "font_size": font_size(line_map, ink, pos),
+            "font_size": size or font_size(line_map, ink, pos),
             "angle": text_angle(line_map, page_mask, pos),
             "color": color,
             "stroke": stroke,
+            "stroke_width": stroke_w,        # 테두리 굵기(px). 테두리가 없으면 None
+            "thick": stroke_width(glyph),    # 획 굵기(px). 프런트가 번역문 획을 이 굵기에 맞춘다
         })
     return lines
 
@@ -246,35 +259,92 @@ def detect_boxes(file, classes=("text",)):
             for i, (p, o, s) in enumerate(zip(text_boxes, owners, sfx))]
 
 
-def text_colors(arr, page_mask, box):
-    x1, y1, x2, y2 = box
-    crop, m = arr[y1:y2, x1:x2].astype(np.float32), page_mask[y1:y2, x1:x2]
-    if m.sum() < 20 or (~m).sum() < 20:
-        return "#000000", None
-    ring = (cv2.dilate(m.astype(np.uint8), square(6)) > 0) & ~m     # 글자 바로 둘레 띠 = 글자의 실제 배경 (상자 전체 배경은 다른 색이 섞임)
-    bg = np.median(crop[ring], axis=0) if ring.sum() >= 20 else np.median(crop[~m], axis=0)
-    far = m & (np.linalg.norm(crop - bg, axis=2) > 60)
-    if far.sum() < 20:
-        return "#000000", None
-    hexc = lambda c: "#%02x%02x%02x" % tuple(int(round(v)) for v in c)
-    px = crop[far]
-    lum = 0.299 * px[:, 0] + 0.587 * px[:, 1] + 0.114 * px[:, 2]
-    dm = np.median(px[lum <= np.percentile(lum, 35)], axis=0)
-    lm = np.median(px[lum >= np.percentile(lum, 65)], axis=0)
-    if np.linalg.norm(dm - lm) > 110:
-        near_d = np.linalg.norm(crop - dm, axis=2) < np.linalg.norm(crop - lm, axis=2)
-        d_mask, l_mask = far & near_d, far & ~near_d
-        if min(d_mask.sum(), l_mask.sum()) >= 0.25 * far.sum():
-            touch = cv2.dilate((~far).astype(np.uint8), square(1)) > 0     # 배경(또는 글자 아닌 곳)과 맞닿은 픽셀
-            d_touch = (d_mask & touch).sum() / d_mask.sum()
-            l_touch = (l_mask & touch).sum() / l_mask.sum()
-            fill, stroke = (lm, dm) if d_touch > l_touch else (dm, lm)
-            #테두리 후보가 채움색과 배경색의 중간색이면 테두리가 아니라 가장자리 번짐(안티에일리어싱)
-            seg = bg - fill
-            t = np.clip(np.dot(stroke - fill, seg) / max(np.dot(seg, seg), 1e-6), 0, 1)
-            if np.linalg.norm(stroke - (fill + t * seg)) > 40:
-                return hexc(fill), hexc(stroke)
-    return hexc(np.median(px, axis=0)), None
+def snap_color(c):   # 어두우면 검정, 밝으면 흰색으로 맞춘다
+    l = 54 * c[0] + 183 * c[1] + 19 * c[2]
+    return (0, 0, 0) if l <= 64 * 256 else (255, 255, 255) if l >= 191 * 256 else tuple(int(round(v)) for v in c)
+
+
+def color_between(c, a, b):   # c 가 a 와 b 를 섞은 색인가 (글자 가장자리가 번진 색)
+    seg = b - a
+    t = np.dot(c - a, seg) / max(np.dot(seg, seg), 1e-6)
+    return 0 <= t <= 1 and ((c - a - t * seg) ** 2).sum() <= 24 * 24 * 3
+
+
+#대사 글자색·테두리 (11-15 결정). 글자 상자를 2px 넓혀 그 안 픽셀을 4가지 색으로 묶는다(바탕, 가장 어두운 색, 가장 밝은 색, 그 셋과 가장 먼 색).
+#한 색을 벽으로 쳤을 때 상자 가장자리에서 닿을 수 없는(갇힌) 다른 색이 있으면 갇힌 색 = 글자색, 벽 색 = 테두리색.
+#후보가 여럿이면 (두 색의 차이) × (갇힌 픽셀 중 글자 마스크 안에 있는 수) 가 가장 큰 쪽. 갇힌 색이 없으면 바탕과 가장 다른 색이 글자색, 테두리 없음.
+#letter: 페이지 크기 글자 마스크 (SAM 2.1 둘째 후보). 갇힌 색을 찾는 방식은 Koharu 의 detection.rs 를 따랐다
+#→ (글자색, 테두리색 또는 None, 테두리 굵기 px 또는 None, 글자색으로 본 픽셀(넓힌 상자 크기 bool)). 효과음 렌더(sfx_style.measure)도 이걸 쓴다
+def enclosed_colors(arr, box, letter):
+    H, W = arr.shape[:2]
+    x1, y1, x2, y2 = max(0, box[0] - 2), max(0, box[1] - 2), min(W, box[2] + 2), min(H, box[3] + 2)
+    crop, ins = arr[y1:y2, x1:x2].astype(np.int64), letter[y1:y2, x1:x2]
+    h, w = crop.shape[:2]
+    if h < 5 or w < 5:
+        return "#000000", None, None, np.zeros((h, w), bool)
+    hexc = lambda c: "#%02x%02x%02x" % snap_color(c)
+    dist2 = lambda a, b: float(((a - b) ** 2).sum())
+    lum = lambda c: 54 * c[:, 0] + 183 * c[:, 1] + 19 * c[:, 2]
+    med = lambda m: np.median(crop[m], axis=0)
+    band = np.ones((h, w), bool)
+    band[2:-2, 2:-2] = False
+    seed = np.median(crop[band], axis=0)   # 가장자리 2px 띠의 가운데값 = 바탕색
+    px = crop.reshape(-1, 3)
+    _, inv, cnt = np.unique((px[:, 0] >> 4) * 256 + (px[:, 1] >> 4) * 16 + (px[:, 2] >> 4), return_inverse=True, return_counts=True)   # 색을 채널마다 16단계로 줄여 모은다
+    pal = np.zeros((len(cnt), 3))
+    np.add.at(pal, inv, px)
+    pal /= cnt[:, None]
+    ok = np.nonzero(cnt >= 4)[0] if (cnt >= 4).any() else np.arange(len(cnt))
+    centers = [seed, pal[ok[np.argmin(lum(pal[ok]))]], pal[ok[np.argmax(lum(pal[ok]))]]]
+    far = np.min([((pal - c) ** 2).sum(1) for c in centers], axis=0) * np.minimum(cnt, 64)
+    centers = np.array(centers + [pal[np.argmax(far)]], float)
+    for _ in range(4):   # 가까운 색끼리 묶기를 4번
+        near = np.argmin(((pal[:, None] - centers[None]) ** 2).sum(2), axis=1)
+        for k in range(4):
+            if (near == k).any():
+                centers[k] = (pal[near == k] * cnt[near == k, None]).sum(0) / cnt[near == k].sum()
+    lab = np.argmin(((px[:, None].astype(float) - centers[None]) ** 2).sum(2), axis=1).reshape(h, w)   # 픽셀마다 몇 번 색인가
+    used = [k for k in range(4) if (lab == k).any()]
+    back = min(used, key=lambda k: dist2(centers[k], seed))
+    bg = med(lab == back)
+    best = None
+    for s in used:
+        wall = lab == s
+        if s == back or wall.sum() < 8:
+            continue
+        _, comp = cv2.connectedComponents(np.pad(~wall, 1, constant_values=True).astype(np.uint8), connectivity=4)
+        outside = (comp == comp[0, 0])[1:-1, 1:-1]   # 벽을 못 넘고 상자 가장자리에서 닿는 곳
+        _, wcomp = cv2.connectedComponents(wall.astype(np.uint8), connectivity=8)
+        for f in used:
+            fill = (lab == f) & ~outside   # 벽 안에 갇힌 픽셀
+            if f == s or fill.sum() < 8:
+                continue
+            ids = np.unique(wcomp[(cv2.dilate(fill.astype(np.uint8), square(1)) > 0) & wall])
+            stroke = np.isin(wcomp, ids[ids > 0])   # 갇힌 픽셀을 감싼 벽
+            if stroke.sum() < 8:
+                continue
+            fc, sc = med(fill), med(stroke)
+            if min(dist2(fc, sc), dist2(fc, bg), dist2(sc, bg)) < 32 * 32 or color_between(fc, sc, bg) or color_between(sc, fc, bg) or snap_color(fc) == snap_color(sc):
+                continue
+            width = cv2.distanceTransform((~fill).astype(np.uint8), cv2.DIST_L2, 5)[stroke & (cv2.dilate(outside.astype(np.uint8), square(1)) > 0)]   # 벽 바깥쪽 끝에서 글자까지
+            width = width[width > 0]
+            if len(width) < 8 or np.median(width) < 2:
+                continue
+            score = dist2(fc, sc) * min(int((fill & ins).sum()), 4096)
+            if best is None or score > best[0]:
+                best = (score, hexc(fc), hexc(sc), float(np.median(width)), fill & ins if (fill & ins).sum() >= 50 else fill)
+    if best:
+        return best[1:]
+    if len(used) == 1:
+        return hexc(med(lab == used[0])), None, None, lab == used[0]
+    def ink(k):
+        m = lab == k
+        n = int((m & ins).sum())
+        return dist2(med(m), bg) * min(n + int(m.sum()) if n >= 8 else int(m.sum()), 4096)
+    k = max([k for k in used if k != back], key=ink)
+    m = (lab == k) & ins
+    m = m if m.sum() >= 8 else lab == k
+    return hexc(med(m)), None, None, m
 
 
 #글자 상자 가운데 점이 들어간 말풍선 모양. bubbles: {말풍선 상자: 페이지 크기 모양}

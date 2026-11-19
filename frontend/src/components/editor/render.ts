@@ -51,6 +51,46 @@ export async function ensureFont(font: FontChoice) {
 
 const fontSpec = (size: number, family: string) => `${WEIGHT} ${size}px "${family}", ${FALLBACK}`;
 
+//폰트의 획 굵기 ÷ 글자 크기. 견본 글자를 그려서 재고, 폰트마다 한 번만 잰다
+//획 굵기 = 글자 안 픽셀에서 글자 밖까지 거리의 평균 × 4 (백엔드 sfx_style.stroke_width 와 같은 식. 거리는 가로세로 3·대각선 4 로 어림)
+const fontThicks = new Map<string, number>();
+function fontThick(family: string) {
+  const known = fontThicks.get(family);
+  if (known !== undefined) return known;
+  const S = 64, W = S * 8, H = S * 2;
+  const cv = document.createElement("canvas");
+  cv.width = W;
+  cv.height = H;
+  const g = cv.getContext("2d", { willReadFrequently: true })!;
+  g.font = fontSpec(S, family);
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.fillText("가나다라마바사", W / 2, H / 2);
+  const alpha = g.getImageData(0, 0, W, H).data;
+  const d = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) d[i] = alpha[i * 4 + 3] > 127 ? 1e9 : 0;
+  const near = (i: number, j: number, cost: number) => { if (d[j] + cost < d[i]) d[i] = d[j] + cost; };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {   // 왼쪽 위에서부터
+    const i = y * W + x;
+    if (!d[i]) continue;
+    if (x > 0) near(i, i - 1, 3);
+    if (y > 0) { near(i, i - W, 3); if (x > 0) near(i, i - W - 1, 4); if (x < W - 1) near(i, i - W + 1, 4); }
+  }
+  let sum = 0, n = 0;
+  for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {   // 오른쪽 아래에서부터
+    const i = y * W + x;
+    if (!d[i]) continue;
+    if (x < W - 1) near(i, i + 1, 3);
+    if (y < H - 1) { near(i, i + W, 3); if (x < W - 1) near(i, i + W + 1, 4); if (x > 0) near(i, i + W - 1, 4); }
+    sum += d[i] / 3;
+    n++;
+  }
+  const thick = n ? (4 * sum) / n / S : 0.14;
+  if (document.fonts.check(g.font)) fontThicks.set(family, thick);   // 폰트가 아직 안 올라왔으면 다음에 다시 잰다
+  return thick;
+}
+let thinLayer: HTMLCanvasElement | undefined;   // 획을 깎을 때 쓰는 따로 그리는 판
+
 //글을 줄로 나눈다 (i 번째 줄 폭 = widthAt(i)). \n 은 무조건 줄바꿈. broke = 단어 하나가 폭보다 길어서 글자 단위로 끊었음
 function wrap(ctx: CanvasRenderingContext2D, text: string, widthAt: (i: number) => number) {
   const lines: string[] = [];
@@ -274,17 +314,49 @@ export function renderPage(
     ctx.translate(x1 + w / 2, y1 + cy);
     if (c.angle) ctx.rotate((c.angle * Math.PI) / 180);
     const top = -(lines.length * step) / 2;
-    lines.forEach((line, i) => {
-      const y = top + (i + 0.5) * step;
-      const x = centers ? centers[i] - w / 2 : 0;
-      if (c.stroke) {
-        ctx.strokeStyle = c.stroke;
-        ctx.lineWidth = Math.max(2, size / 6);   // DOM 의 8방향 그림자(size/12)와 같은 두께
-        ctx.strokeText(line, x, y);
-      }
-      ctx.fillStyle = c.color ?? "#000";
-      ctx.fillText(line, x, y);
-    });
+    //획 굵기·테두리 굵기를 원본에서 잰 값(thick, stroke_width)에 맞춘다. 그려진 크기 ÷ 원본 글자 크기만큼 줄여서 쓴다
+    //값이 없는 옛 상자는 예전대로: 폰트 굵기 그대로, 테두리 = 글자 크기/12
+    const scale = size / (c.font_size || size);
+    const base = fontThick(family) * size;
+    const k = c.thick ? (c.thick * scale - base) / 2 : 0;
+    const grow = k >= 0.5 ? k : k <= -0.5 ? -Math.min(-k, base / 4) : 0;   // + 면 획을 부풀리고 − 면 깎는다 (깎는 건 획의 1/4 까지, 효과음과 같은 규칙)
+    const edge = c.stroke ? (c.stroke_width ? c.stroke_width * scale : Math.max(2, size / 6) / 2) : 0;
+    const color = c.color ?? "#000";
+    const each = (draw: (line: string, x: number, y: number) => void) => lines.forEach((line, i) => draw(line, centers ? centers[i] - w / 2 : 0, top + (i + 0.5) * step));
+    if (c.stroke) {   // 테두리: (깎인) 글자 가장자리에서 edge 만큼 바깥까지
+      ctx.strokeStyle = ctx.fillStyle = c.stroke;
+      ctx.lineWidth = 2 * Math.max(0, edge + grow);
+      each((line, x, y) => {
+        if (edge + grow > 0) ctx.strokeText(line, x, y);
+        if (grow < 0) ctx.fillText(line, x, y);
+      });
+    }
+    if (grow < 0) {   // 획 깎기: 따로 그려서 가장자리를 −grow 만큼 지운 뒤 얹는다
+      const hw = Math.ceil(w / 2 + Math.max(...lines.map((line) => ctx.measureText(line).width)) / 2 + size);
+      const hh = Math.ceil((lines.length * step) / 2 + size);
+      const layer = (thinLayer ??= document.createElement("canvas"));
+      layer.width = 2 * hw;
+      layer.height = 2 * hh;
+      const g = layer.getContext("2d")!;
+      g.font = ctx.font;
+      g.textAlign = "center";
+      g.textBaseline = "middle";
+      g.lineJoin = "round";
+      g.translate(hw, hh);
+      g.fillStyle = color;
+      each((line, x, y) => g.fillText(line, x, y));
+      g.globalCompositeOperation = "destination-out";
+      g.lineWidth = -2 * grow;
+      each((line, x, y) => g.strokeText(line, x, y));
+      ctx.drawImage(layer, -hw, -hh);
+    } else {
+      ctx.fillStyle = ctx.strokeStyle = color;
+      ctx.lineWidth = 2 * grow;
+      each((line, x, y) => {
+        ctx.fillText(line, x, y);
+        if (grow > 0) ctx.strokeText(line, x, y);
+      });
+    }
     ctx.restore();
   }
 }
