@@ -17,11 +17,13 @@ export const FontPicker = memo(function FontPicker({
   value,
   onChange,
   inline = false,
+  title = "Render font",
 }: {
   fonts: FontChoice[];   //기본 폰트 포함 전체 선택지
   value: FontChoice;
   onChange: (f: FontChoice) => void;
   inline?: boolean;
+  title?: string;   //버튼에 마우스를 올리면 뜨는 글
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -45,7 +47,7 @@ export const FontPicker = memo(function FontPicker({
         className={`rounded-lg border bg-background text-left transition-colors hover:bg-muted ${inline ? "h-8 w-full px-2.5 text-sm" : "h-7 min-w-36 px-2.5 text-xs"}`}
         style={{ fontFamily: `"${value.family}", Malgun Gothic, sans-serif` }}
         onClick={() => setOpen(!open)}
-        title="Render font"
+        title={title}
       >
         {value.family}
       </button>

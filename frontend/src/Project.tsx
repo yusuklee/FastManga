@@ -47,6 +47,7 @@ export type Content = {
 //폰트 선택지. regular/bold 는 백엔드 /fontfiles/ 아래 상대 경로 (없으면 시스템 폰트)
 export type FontChoice = { family: string; regular?: string | null; bold?: string | null };
 const DEFAULT_FONT: FontChoice = { family: "Malgun Gothic" };
+const DEFAULT_SFX_FONT = "Dokdo";   //백엔드 기본값(Process/sfx_model.FONT)과 같게
 
 type PageContents = { [page: string]: Content[] };
 
@@ -138,8 +139,8 @@ const post_pair = async (path: string, page: string, erased: string, contents: P
   if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
   return URL.createObjectURL(await r.blob());
 };
-const post_sfx = (page: string, erased: string, contents: Content[]) =>
-  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, translated, group, letter, mask }) => ({ pos, mask_area, word, translated, group, letter, mask: letter ? mask : undefined })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
+const post_sfx = (page: string, erased: string, contents: Content[], sfxFont: string) =>   //sfxFont: 설정의 효과음 폰트. 상자에 폰트가 따로 정해져 있으면 그 폰트
+  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, translated, group, letter, mask, font }) => ({ pos, mask_area, word, translated, group, letter, mask: letter ? mask : undefined, font: font ?? sfxFont })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
 
 export function Project({
   project,
@@ -244,7 +245,7 @@ export function Project({
   const [rightOpen, setRightOpen] = useState(true); //TEXT·SETTINGS 패널
   //설정 (⚙ 버튼으로 여는 창): 원본→번역 언어, 인페인팅 모델
   const [settings, setSettings] = useState<AppSettings>(() => {
-    const { fontFamily: _f, ...saved } = loadSettings();
+    const { fontFamily: _f, sfxFontFamily: _s, ...saved } = loadSettings();
     //예전 버전에서 저장된 값이 지금 목록에 없으면 기본값으로
     const provider = saved.provider && saved.provider in PROVIDERS ? saved.provider : "gemini";
     const localModel = LOCAL_MODELS.some((m) => m.id === saved.localModel) ? saved.localModel! : DEFAULT_SETTINGS.localModel;
@@ -303,11 +304,12 @@ export function Project({
   };
 
   //렌더 폰트. 기본은 시스템 Malgun Gothic, 나머지는 백엔드(/fonts)가 주는 koharu 내장 폰트
-  const [font, set_font] = useState<FontChoice>(DEFAULT_FONT);
+  const [font, set_font] = useState<FontChoice>(() => { const f = loadSettings().fontFamily; return f ? { family: f } : DEFAULT_FONT; });   //저장해 둔 이름으로 시작하고, 글꼴 목록이 오면 파일 경로까지 채운다
+  const [sfxFont, setSfxFont] = useState<FontChoice>(() => ({ family: loadSettings().sfxFontFamily ?? DEFAULT_SFX_FONT }));   //효과음은 백엔드가 그리니 이름만 있으면 된다
   const [allFont, setAllFont] = useState<FontChoice[]>([]);
   const fontChoices = useMemo(() => [DEFAULT_FONT, ...allFont], [allFont]);
   //설정·글꼴을 바꿀 때마다 localStorage 에. 글꼴 목록이 오면 저장해 둔 글꼴을 다시 고른다
-  useEffect(() => saveSettings(settings, font.family), [settings, font.family]);
+  useEffect(() => saveSettings(settings, font.family, sfxFont.family), [settings, font.family, sfxFont.family]);
   useEffect(() => {
     const saved = loadSettings().fontFamily;
     const f = saved && fontChoices.find((c) => c.family === saved);
@@ -472,10 +474,10 @@ const setErased = (page: string, image: string) => {
   //효과음 렌더 갱신: 지운 이미지가 있고 번역된 의성어 상자가 있으면 백엔드에 그려 달라고 한다. 조건이 전과 같으면 건너뜀
   const ensureSfx = async (page: string, contents = pageContents[page], erased = inpaintedImgs[page]) => {
     const targets = contents ? sfxTargets(contents) : [];
-    const key = erased && targets.length ? `${erased}|${targets.map((c) => `${c.id}:${c.translated}:${c.pos.join(",")}`).join("|")}` : "";
+    const key = erased && targets.length ? `${erased}|${sfxFont.family}|${targets.map((c) => `${c.id}:${c.translated}:${c.pos.join(",")}:${c.font ?? ""}`).join("|")}` : "";
     if (sfxKeys.current[page] === key) return;
     sfxKeys.current[page] = key;
-    const image = key ? await prepareModels().then(() => post_sfx(page, erased!, contents!)).catch((e) => { setProgress(`SFX render error: ${(e as Error).message}`); return undefined; }) : undefined;
+    const image = key ? await prepareModels().then(() => post_sfx(page, erased!, contents!, sfxFont.family)).catch((e) => { setProgress(`SFX render error: ${(e as Error).message}`); return undefined; }) : undefined;
     if (sfxKeys.current[page] !== key) return; //그 사이 조건이 바뀌었으면 버린다
     setSfxImgs((prev) => {
       if (prev[page]?.startsWith("blob:")) URL.revokeObjectURL(prev[page]);
@@ -688,10 +690,10 @@ const setErased = (page: string, image: string) => {
   const curInpainted = selectedPage ? inpaintedImgs[selectedPage] : undefined;
   const curContents = selectedPage ? pageContents[selectedPage] : undefined;
   const curSfx = selectedPage ? sfxImgs[selectedPage] : undefined;
-  //보고 있는 페이지의 효과음 번역문이 바뀌면(TEXT 패널에서 고친 것 포함) 다시 그린다
+  //보고 있는 페이지의 효과음 번역문이 바뀌면(TEXT 패널에서 고친 것 포함), 설정의 효과음 폰트가 바뀌면 다시 그린다
   useEffect(() => {
     if (selectedPage && curInpainted) void ensureSfx(selectedPage, curContents, curInpainted);
-  }, [selectedPage, curInpainted, curContents]);
+  }, [selectedPage, curInpainted, curContents, sfxFont.family]);
   const hasInpainted = !!curInpainted;
   const hasRendered = !!curContents?.some((c) => c.translated);
   const shownView: View = view === "rendered" && hasRendered ? "rendered" : view !== "original" && hasInpainted ? "inpainted" : "original";
@@ -1045,6 +1047,9 @@ const setErased = (page: string, image: string) => {
         fonts={fontChoices}
         font={font}
         onFont={set_font}
+        sfxFonts={allFont}
+        sfxFont={sfxFont}
+        onSfxFont={setSfxFont}
         onChange={setSettings}
         needKey={needKey}
         onClose={() => { setSettingsOpen(false); setNeedKey(false); }}
