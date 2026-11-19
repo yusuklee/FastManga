@@ -192,7 +192,7 @@ def ocr_boxes(image, boxes, ocr="hayai"):
         if b.get("sfx"):
             from Process import sam_mask
             erase, mask = sam_mask.letter_mask(image, pos)   # 지우기도 SAM 2.1 마스크로
-            letter = bool(b.get("user"))                     # 사람이 그린 상자만 회전·크기까지 이 마스크로 정한다
+            letter = True                                    # 회전·크기도 이 마스크를 감싸는 가장 작은 직사각형으로 정한다 (11-19 결정: 탐지기가 잡은 상자도 사람이 그린 상자와 같게)
             area, masks, _ = sam_mask.candidates(image, pos)
             glyphs = np.zeros(arr.shape[:2], bool)
             glyphs[area[1]:area[3], area[0]:area[2]] = masks[1]   # 색은 둘째 후보(가장 넓게 잡는 것)로
