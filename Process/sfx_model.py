@@ -1,9 +1,10 @@
-#효과음 스타일 모델: 일본어 효과음 조각 → 폰트·기울이기·첫 글자 크기 비율·늘이기 (값 4개)
-#manga-ocr 의 그림 인코더(ViT) + 머리 4개. 학습: D:\sfx_train\label4\finetune.py (japanese 8편, 라벨 5,061개)
+#효과음 스타일 모델: 일본어 효과음 조각 → 기울이기·늘이기 (3단계씩). 폰트와 첫 글자 크기 비율은 고정값
+#SigLIP 2 그림 인코더 + 한 쪽의 효과음끼리 서로 보는 트랜스포머 2층 + 머리 2개. 학습: D:\sfx_train\label4\finetune2.py (japanese 8편, 라벨 5,061개)
 import os, threading
 
-REPO, REV = "yusuklee/fastmanga-sfx-style", "5cffe834660096c4823c30b79adb4ddce45ccc49"
+REPO, REV = "yusuklee/fastmanga-sfx-style", "e1b72581b06e4af75763f4476e56dcd3eb907d8e"
 PATTERNS = ["*.json", "*.safetensors"]
+FONT, SMALL = "Dokdo", 0.9   # 모델이 정하지 않는 값: 폰트, 둘째 글자부터의 크기 비율 (라벨에서 가장 흔한 값)
 
 _net = None
 _lock = threading.Lock()
@@ -17,7 +18,7 @@ def load():
             import torch, torch.nn as nn
             from huggingface_hub import snapshot_download
             from safetensors.torch import load_file
-            from transformers import ViTConfig, ViTModel
+            from transformers import SiglipVisionConfig, SiglipVisionModel
             path = snapshot_download(REPO, revision=REV, allow_patterns=PATTERNS)
             cfg = json.load(open(os.path.join(path, "config.json"), encoding="utf-8"))
             d = cfg["d"]
@@ -25,15 +26,14 @@ def load():
             class Net(nn.Module):
                 def __init__(self):
                     super().__init__()
-                    self.enc = ViTModel(ViTConfig(**cfg["encoder"]))
+                    self.enc = SiglipVisionModel(SiglipVisionConfig(**cfg["encoder"]))
                     self.inp = nn.Sequential(nn.Linear(self.enc.config.hidden_size + 5, d), nn.GELU(), nn.Dropout(0.1))
-                    self.page = nn.TransformerEncoder(nn.TransformerEncoderLayer(d, 4, d * 2, 0.1, batch_first=True, norm_first=True), 2, enable_nested_tensor=False) if cfg["page"] else None
-                    self.heads = nn.ModuleList(nn.Linear(d, len(cfg[k])) for k in ("fonts", "skew", "small", "stretch"))
+                    self.page = nn.TransformerEncoder(nn.TransformerEncoderLayer(d, 4, d * 2, 0.1, batch_first=True, norm_first=True), 2, enable_nested_tensor=False)
+                    self.heads = nn.ModuleList(nn.Linear(d, len(cfg[k])) for k in ("skew", "stretch"))
 
                 def forward(self, x, geo):
-                    h = self.inp(torch.cat([self.enc(pixel_values=x).last_hidden_state.mean(1), geo], 1))
-                    if self.page is not None:   # 한 쪽의 효과음끼리 서로 보게 한다
-                        h = self.page(h[None])[0]
+                    h = self.inp(torch.cat([self.enc(pixel_values=x).pooler_output, geo], 1))
+                    h = self.page(h[None])[0]   # 한 쪽의 효과음끼리 서로 보게 한다
                     return [head(h) for head in self.heads]
 
             net = Net()
@@ -69,4 +69,4 @@ def predict(page, boxes):
     mean, std = (torch.tensor(cfg[k], device=p.device).view(1, 3, 1, 1) for k in ("mean", "std"))
     with torch.no_grad():
         out = [o.argmax(-1).tolist() for o in net(((x - mean) / std).to(p.dtype), torch.tensor(geo, device=p.device, dtype=p.dtype))]
-    return [dict(font=cfg["fonts"][a], skew=cfg["skew"][b], small=cfg["small"][c], stretch=cfg["stretch"][e]) for a, b, c, e in zip(*out)]
+    return [dict(font=FONT, skew=cfg["skew"][a], small=SMALL, stretch=cfg["stretch"][b]) for a, b in zip(*out)]

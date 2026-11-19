@@ -1,4 +1,4 @@
-#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·글자 줄 기울기는 원본에서 재고, 폰트·기울이기·첫 글자 비율·늘이기는 모델(Process/sfx_model.py)이 정한다
+#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·글자 줄 기울기는 원본에서 재고, 기울이기·늘이기는 모델(Process/sfx_model.py)이 정한다. 폰트·첫 글자 비율은 고정값
 import os, math, threading
 import numpy as np, cv2
 from PIL import Image, ImageDraw, ImageFont
@@ -332,7 +332,7 @@ def dedup(contents, textmask=None):
 
 def render_page(original, erased, contents):
     """original·erased: PIL 페이지. contents: [{pos, mask_area?, word, translated, group?, letter?, mask?, font?, skew?, small?, stretch?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
-    모델 몫 4개(폰트·기울이기·둘째 글자부터 크기 small·늘이기 stretch)는 상자에 있으면 그 값. 획 굵기는 원본에 맞춘다, 없으면 모델이 고른 글씨체의 기본값. 이은 상자(group 이 같음)는 가장 크게 잰 상자의
+    폰트·기울이기·둘째 글자부터 크기 small·늘이기 stretch 는 상자에 있으면 그 값, 없으면 모델(기울이기·늘이기)과 고정값(폰트·small). 획 굵기는 원본에 맞춘다, 없으면 모델이 고른 글씨체의 기본값. 이은 상자(group 이 같음)는 가장 크게 잰 상자의
     글씨체만 같이 쓰고 나머지는 상자마다 따로. 회전은 원본 글자 줄의 기울기 그대로 (기울이기는 글자 모양만 바꾸고 회전에는 안 쓴다). 글자 마스크가 있으면 회전·크기를 그걸 감싸는 가장 작은 직사각형으로: 그 기울기로 돌리고, 그 안에서 키우다 닿으면 멈춘다"""
     page = original.convert("RGB")
     src = np.array(page)
@@ -369,7 +369,7 @@ def render_page(original, erased, contents):
             m["tilt"] = tilt(diff_mask(pj, out[max(0, py1):py2, max(0, px1):px2]) & (pj.mean(2) < 100)) if rect is None else rect[4]
             items.append(dict(box=(bx1, by1, bx2, by2), region=region, lines=lines, m=m, c=c, group=c.get("group"), rect=rect, pos=(max(0, px1), max(0, py1), min(W, px2), min(H, py2))))
         from Process.sfx_model import predict
-        for it, s in zip(items, predict(page, [it["pos"] for it in items])):   # 모델 몫 4개: 상자에 값이 있으면 그 값, 없으면 모델이 고른 것
+        for it, s in zip(items, predict(page, [it["pos"] for it in items])):   # 상자에 값이 있으면 그 값, 없으면 모델이 고른 것 (폰트·small 은 고정값)
             c = it["c"]
             it["font"] = c["font"] if c.get("font") in font_paths() else s["font"] if s["font"] in font_paths() else "Dokdo"
             it["skew"], it["small"], it["stretch"] = float(c.get("skew", s["skew"])), float(c.get("small", s["small"])), float(c.get("stretch", s["stretch"]))
