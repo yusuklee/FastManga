@@ -553,7 +553,7 @@ const setErased = (page: string, image: string) => {
     setPageContents((prev) => ({ ...prev, [page]: ungroup(prev[page] ?? [], id, true).filter((c) => c.id !== id) }));
   }, [selectedPage]);
   const [addingBox, setAddingBox] = useState(false);
-  const [addTool, setAddTool] = useState<"rect" | "pen" | "trash" | "restore" | "link" | "brush">("rect"); //사각형 드래그 / 펜으로 둘러 그리기(그 테두리 상자) / 상자 누르면 삭제 / 상자 누르면 원상복구 / 상자 잇기 / 칠해서 지우기
+  const [addTool, setAddTool] = useState<"rect" | "trash" | "restore" | "link" | "brush">("rect"); //사각형 드래그 / 상자 누르면 삭제 / 상자 누르면 원상복구 / 상자 잇기 / 칠해서 지우기
   const [brush, setBrush] = useState(30); //지우기 붓 굵기 (이미지 px)
   //원상복구: 상자가 지운 자리를 원본으로 되돌리고 상자(번역)를 뺀다 → 그 자리는 다시 원문
   const restoreBox = async (id: number) => {
@@ -655,13 +655,13 @@ const setErased = (page: string, image: string) => {
     }
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
     addStart.current = at;
-    if (addTool === "pen" || addTool === "brush") setPenPath([at]);
+    if (addTool === "brush") setPenPath([at]);
     else setAddRect([...at, ...at] as [number, number, number, number]);
   };
   const onAddMove = (e: React.PointerEvent) => {
     if (!addStart.current) return;
     const [x, y] = toImg(e), [sx, sy] = addStart.current;
-    if (addTool === "pen" || addTool === "brush") setPenPath((p) => [...p, [x, y]]);
+    if (addTool === "brush") setPenPath((p) => [...p, [x, y]]);
     else setAddRect([Math.min(sx, x), Math.min(sy, y), Math.max(sx, x), Math.max(sy, y)]);
   };
   const onAddUp = () => {
@@ -672,10 +672,7 @@ const setErased = (page: string, image: string) => {
       setPenPath([]);
       return;
     }
-    //펜: 그린 선을 감싸는 사각형이 상자
-    const r: [number, number, number, number] | null = addTool === "pen"
-      ? (penPath.length > 1 ? [Math.min(...penPath.map((q) => q[0])), Math.min(...penPath.map((q) => q[1])), Math.max(...penPath.map((q) => q[0])), Math.max(...penPath.map((q) => q[1]))] : null)
-      : addRect;
+    const r = addRect;
     addStart.current = null;
     setAddRect(null);
     setPenPath([]);
@@ -830,11 +827,10 @@ const setErased = (page: string, image: string) => {
           ＋
         </button>
         {addingBox && ([
-          ["rect", "Rectangle: drag over the text", <rect key="r" x="4" y="5" width="16" height="14" rx="1.5" strokeDasharray="4 2.5" />],
-          ["pen", "Pen: draw around the text, the box wraps the stroke", <g key="p"><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L11 16l-4 1 1-4Z" /><path d="M3 21c3 0 5-2 5-5" /></g>],
+          ["rect", "Add detection area", <rect key="r" x="4" y="5" width="16" height="14" rx="1.5" strokeDasharray="4 2.5" />],
           ["trash", "Trash: click a box to remove it", <g key="t"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" /></g>],
-          ["restore", "Restore: click a box to put the original text back there and drop its translation", <g key="u"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></g>],
-          ["link", "Link: drag from a box's top dot to another box's dot (reading order) to read separated letters as one word. Drag a link line to empty space to unlink", <g key="l"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></g>],
+          ["restore", "Remove all detection areas", <g key="u"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></g>],
+          ["link", "Link detection areas", <g key="l"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></g>],
           ["brush", "Erase brush: paint over anything to erase it", <g key="b"><path d="M9.06 11.9l8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08" /><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z" /></g>],
         ] as const).map(([tool, tip, icon]) => (
           <button key={tool} type="button" className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${addTool === tool ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`} onClick={() => setAddTool(tool)} title={tip}>
@@ -998,9 +994,7 @@ const setErased = (page: string, image: string) => {
                           <rect key={c.id} x={c.pos[0]} y={c.pos[1]} width={c.pos[2] - c.pos[0]} height={c.pos[3] - c.pos[1]} fill={addTool === "trash" ? "rgba(239,68,68,0.10)" : "rgba(34,197,94,0.10)"} stroke={addTool === "trash" ? "#ef4444" : "#22c55e"} strokeWidth={2} vectorEffect="non-scaling-stroke" />
                         ))}
                         {addRect && <rect x={addRect[0]} y={addRect[1]} width={addRect[2] - addRect[0]} height={addRect[3] - addRect[1]} fill="rgba(59,130,246,0.15)" stroke="#3b82f6" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />}
-                        {addTool === "brush"
-                          ? penPath.length > 0 && <polyline points={(penPath.length > 1 ? penPath : [penPath[0], penPath[0]]).map((q) => q.join(",")).join(" ")} fill="none" stroke="rgba(239,68,68,0.45)" strokeWidth={brush} strokeLinecap="round" strokeLinejoin="round" />
-                          : penPath.length > 1 && <polyline points={penPath.map((q) => q.join(",")).join(" ")} fill="none" stroke="#3b82f6" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
+                        {penPath.length > 0 && <polyline points={(penPath.length > 1 ? penPath : [penPath[0], penPath[0]]).map((q) => q.join(",")).join(" ")} fill="none" stroke="rgba(239,68,68,0.45)" strokeWidth={brush} strokeLinecap="round" strokeLinejoin="round" />}
                       </svg>
                     </div>
                   )}
@@ -1080,7 +1074,7 @@ const setErased = (page: string, image: string) => {
                 <div className={`h-full bg-primary transition-all ${setup.pct === null ? "w-1/3 animate-pulse" : ""}`} style={setup.pct === null ? undefined : { width: `${setup.pct}%` }} />
               </div>
             )}
-            <div className="mt-2 text-[11px] text-muted-foreground">First time only. Downloads the detection and OCR models (about 0.8 GB).</div>
+            <div className="mt-2 text-[11px] text-muted-foreground">Loading the models into memory. This runs once each time the app starts.</div>
             {setup.state === "error" && <Button className="mt-3" size="sm" onClick={() => setSetup(null)}>Close</Button>}
           </div>
         </div>
