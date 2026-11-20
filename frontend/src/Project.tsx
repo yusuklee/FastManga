@@ -553,9 +553,26 @@ const setErased = (page: string, image: string) => {
     setPageContents((prev) => ({ ...prev, [page]: ungroup(prev[page] ?? [], id, true).filter((c) => c.id !== id) }));
   }, [selectedPage]);
   const [addingBox, setAddingBox] = useState(false);
-  const [addTool, setAddTool] = useState<"rect" | "trash" | "restore" | "link" | "brush">("rect"); //사각형 드래그 / 상자 누르면 삭제 / 상자 누르면 원상복구 / 상자 잇기 / 칠해서 지우기
+  const [addTool, setAddTool] = useState<"rect" | "trash" | "link" | "brush">("rect"); //사각형 드래그 / 상자 누르면 삭제 / 상자 잇기 / 칠해서 지우기
   const [brush, setBrush] = useState(30); //지우기 붓 굵기 (이미지 px)
-  //원상복구: 상자가 지운 자리를 원본으로 되돌리고 상자(번역)를 뺀다 → 그 자리는 다시 원문
+  //이 쪽의 상자를 전부 없앤다. 지운 그림·효과음 그림도 같이 버려서 쪽이 원본으로 돌아간다
+  const clearBoxes = () => {
+    const page = selectedPage;
+    if (!page) return;
+    setPageContents((prev) => ({ ...prev, [page]: [] }));
+    for (const set of [setInpaintedImgs, setSfxImgs]) {
+      set((prev) => {
+        if (prev[page]?.startsWith("blob:")) URL.revokeObjectURL(prev[page]);
+        const next = { ...prev };
+        delete next[page];
+        return next;
+      });
+    }
+    delete sfxKeys.current[page];
+    deleteErased(page);
+    setProgress("Removed all boxes on this page");
+  };
+  //원상복구(TEXT 패널의 Restore 버튼): 상자가 지운 자리를 원본으로 되돌리고 상자(번역)를 뺀다 → 그 자리는 다시 원문
   const restoreBox = async (id: number) => {
     const page = selectedPage, c = page ? pageContents[page]?.find((x) => x.id === id) : undefined;
     if (!page || !c) return;
@@ -647,10 +664,10 @@ const setErased = (page: string, image: string) => {
   const onAddDown = (e: React.PointerEvent) => {
     if (e.button !== 0 || !selectedPage) return;
     const at = toImg(e);
-    if (addTool === "trash" || addTool === "restore") {   //누른 자리에 있는 상자 중 가장 작은 것을 지우거나 원상복구
+    if (addTool === "trash") {   //누른 자리에 있는 상자 중 가장 작은 것을 지운다
       const hit = (pageContents[selectedPage] ?? []).filter((c) => at[0] >= c.pos[0] && at[0] <= c.pos[2] && at[1] >= c.pos[1] && at[1] <= c.pos[3])
         .sort((a, b) => (a.pos[2] - a.pos[0]) * (a.pos[3] - a.pos[1]) - (b.pos[2] - b.pos[0]) * (b.pos[3] - b.pos[1]))[0];
-      if (hit) void (addTool === "trash" ? removeBox(hit.id) : restoreBox(hit.id));
+      if (hit) removeBox(hit.id);
       return;
     }
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
@@ -829,11 +846,11 @@ const setErased = (page: string, image: string) => {
         {addingBox && ([
           ["rect", "Add detection area", <rect key="r" x="4" y="5" width="16" height="14" rx="1.5" strokeDasharray="4 2.5" />],
           ["trash", "Trash: click a box to remove it", <g key="t"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" /></g>],
-          ["restore", "Remove all detection areas", <g key="u"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></g>],
+          ["clear", "Remove all detection areas", <g key="u"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></g>],
           ["link", "Link detection areas", <g key="l"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></g>],
           ["brush", "Erase brush: paint over anything to erase it", <g key="b"><path d="M9.06 11.9l8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08" /><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z" /></g>],
         ] as const).map(([tool, tip, icon]) => (
-          <button key={tool} type="button" className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${addTool === tool ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`} onClick={() => setAddTool(tool)} title={tip}>
+          <button key={tool} type="button" className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${addTool === tool ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`} onClick={() => (tool === "clear" ? clearBoxes() : setAddTool(tool))} title={tip}>   {/* clear 는 고르는 도구가 아니라 누르면 바로 하는 일 */}
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
           </button>
         ))}
@@ -988,10 +1005,10 @@ const setErased = (page: string, image: string) => {
                     );
                   })()}
                   {addingBox && addTool !== "link" && imgSize[0] > 0 && (
-                    <div className={`absolute inset-0 z-30 touch-none ${addTool === "trash" || addTool === "restore" ? "cursor-pointer" : "cursor-crosshair"}`} onPointerDown={onAddDown} onPointerMove={onAddMove} onPointerUp={onAddUp} onPointerCancel={onAddUp}>
+                    <div className={`absolute inset-0 z-30 touch-none ${addTool === "trash" ? "cursor-pointer" : "cursor-crosshair"}`} onPointerDown={onAddDown} onPointerMove={onAddMove} onPointerUp={onAddUp} onPointerCancel={onAddUp}>
                       <svg className="pointer-events-none h-full w-full overflow-visible" viewBox={`0 0 ${imgSize[0]} ${imgSize[1]}`} preserveAspectRatio="none">
-                        {(addTool === "trash" || addTool === "restore") && (curContents ?? []).map((c) => (
-                          <rect key={c.id} x={c.pos[0]} y={c.pos[1]} width={c.pos[2] - c.pos[0]} height={c.pos[3] - c.pos[1]} fill={addTool === "trash" ? "rgba(239,68,68,0.10)" : "rgba(34,197,94,0.10)"} stroke={addTool === "trash" ? "#ef4444" : "#22c55e"} strokeWidth={2} vectorEffect="non-scaling-stroke" />
+                        {addTool === "trash" && (curContents ?? []).map((c) => (
+                          <rect key={c.id} x={c.pos[0]} y={c.pos[1]} width={c.pos[2] - c.pos[0]} height={c.pos[3] - c.pos[1]} fill="rgba(239,68,68,0.10)" stroke="#ef4444" strokeWidth={2} vectorEffect="non-scaling-stroke" />
                         ))}
                         {addRect && <rect x={addRect[0]} y={addRect[1]} width={addRect[2] - addRect[0]} height={addRect[3] - addRect[1]} fill="rgba(59,130,246,0.15)" stroke="#3b82f6" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />}
                         {penPath.length > 0 && <polyline points={(penPath.length > 1 ? penPath : [penPath[0], penPath[0]]).map((q) => q.join(",")).join(" ")} fill="none" stroke="rgba(239,68,68,0.45)" strokeWidth={brush} strokeLinecap="round" strokeLinejoin="round" />}
