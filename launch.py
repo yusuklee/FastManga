@@ -30,13 +30,11 @@ def setup_env():
 def hf_models():
     from Process.hayai import REPO, REV, PROC_REPO, PROC_REV, PATTERNS, PROC_PATTERNS
     from Process.sam_mask import REPO as SAM_REPO, REV as SAM_REV, PATTERNS as SAM_PATTERNS
-    from Process.sfx_model import REPO as SFX_REPO, REV as SFX_REV, PATTERNS as SFX_PATTERNS
     return [
         ("mayocream/koharu-layout-rfdetr-seg-2xl-1152", ["model.safetensors"], None),   # RF-DETR
         (REPO, PATTERNS, REV),   # OCR (HAYAI, 16비트 314MB)
         (PROC_REPO, PROC_PATTERNS, PROC_REV),   # HAYAI 전처리기
         (SAM_REPO, SAM_PATTERNS, SAM_REV),   # 효과음의 글자 마스크 (SAM 2.1, 16비트 449MB)
-        (SFX_REPO, SFX_PATTERNS, SFX_REV),   # 효과음 스타일 모델 (폰트·기울이기·첫 글자 비율·늘이기)
     ]
 
 

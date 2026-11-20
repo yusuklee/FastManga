@@ -1,4 +1,4 @@
-#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·글자 줄 기울기는 원본에서 재고, 기울이기·늘이기는 모델(Process/sfx_model.py)이 정한다. 폰트·첫 글자 비율은 고정값
+#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·회전·크기·늘이기는 원본에서 잰다(늘이기 = SAM 2.1 글자 마스크 직사각형의 한 글자 칸 세로/가로). 폰트는 설정에서 고른 것(없으면 Dokdo), 기울이기는 쓰지 않는다
 import os, math, threading
 import numpy as np, cv2
 from PIL import Image, ImageDraw, ImageFont
@@ -7,6 +7,19 @@ from Process.inpaint import decode
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _lock = threading.Lock()
 _cache = {}
+
+
+FONT, SMALL = "Dokdo", 0.9   # 설정에서 폰트가 안 오면 쓰는 폰트, 둘째 글자부터의 크기 비율
+_SMALL_KANA = set("ッっャゃュゅョょァィゥェォぁぃぅぇぉヮゎ")
+_NOT_LETTER = set("ー〜~…・.。、,!?！？♡♥❤☆★「」『』()（） \u3000-")
+
+
+#늘이기 (11-20 결정): 글자 마스크를 감싸는 직사각형의 긴 변을 일본어 글자 수로 나눈 한 칸의 세로 ÷ 가로 (작은 글자 ッ·ュ 는 반 칸). 1.0~1.5
+def stretch_of(rect, word):
+    _, _, w, h, _ = rect
+    n = max(1.0, sum(0.5 if ch in _SMALL_KANA else 1 for ch in (word or "") if ch not in _NOT_LETTER))
+    r = (h / n) / w if h > w * 1.1 else h / (w / n)
+    return float(np.clip(r, 1.0, 1.5))
 
 
 def font_paths():
@@ -206,15 +219,33 @@ def diff_mask(jp, bg):
     return cv2.morphologyEx(d, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)) > 0
 
 
-#대사와 같은 방식으로 잰다 (detect_ocr.enclosed_colors, 11-15 결정): 글자 상자 안에서 갇힌 색 = 글자색, 가둔 색 = 테두리색, 가둔 벽의 두께 = 테두리 굵기.
-#글자 마스크는 SAM 2.1 둘째 후보. 획 굵기는 글자색으로 본 픽셀로 잰다. page: 페이지(PIL, RGB), pos: 글자 상자
-def measure(page, pos):
+#효과음 색 (11-20 결정): 1. SAM 2.1 글자 마스크 → 2. 그 마스크를 감싸는 가장 작은 직사각형(cv2.minAreaRect) → 3. 직사각형을 바로 세워 그 안에서 색을 잰다
+#색을 재는 방식은 대사와 같다(detect_ocr.enclosed_colors: 갇힌 색 = 글자색, 가둔 색 = 테두리색, 가둔 벽의 두께 = 테두리 굵기). 대사는 RF-DETR 상자에서 잰다
+#page: 페이지(PIL, RGB), pos: 효과음 상자(탐지기 상자 또는 사람이 그린 상자). → (글자색, 테두리색 또는 None, 테두리 굵기 또는 None, 글자색으로 본 픽셀)
+def sfx_colors(page, pos):
     from Process import sam_mask
     from Process.detect_ocr import enclosed_colors
+    W, H = page.size
+    #1. SAM 2.1 글자 마스크
+    ar, k = sam_mask.letter_mask(page, pos)
+    ys, xs = np.nonzero(k)
+    if len(xs) < 3:   # 마스크가 비면 직사각형을 못 만든다 → 상자에서
+        return enclosed_colors(np.asarray(page), pos, np.zeros((H, W), bool))
+    #2. 최적의 직사각형
+    (cx, cy), (w, h), a = cv2.minAreaRect(np.stack([xs + ar[0], ys + ar[1]], 1).astype(np.float32))
+    #3. 직사각형을 바로 세워 그 안에서 색 (갇힌 색 후보 점수에 쓰는 글자 마스크는 SAM 2.1 둘째 후보)
     area, masks, _ = sam_mask.candidates(page, pos)
-    glyphs = np.zeros((page.height, page.width), bool)
+    glyphs = np.zeros((H, W), np.uint8)
     glyphs[area[1]:area[3], area[0]:area[2]] = masks[1]
-    color, outline, width, fill = enclosed_colors(np.asarray(page), pos, glyphs)
+    R = cv2.getRotationMatrix2D((cx, cy), a, 1.0)
+    arr = cv2.warpAffine(np.asarray(page), R, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    glyphs = cv2.warpAffine(glyphs, R, (W, H), flags=cv2.INTER_NEAREST) > 0
+    return enclosed_colors(arr, (int(cx - w / 2), int(cy - h / 2), int(math.ceil(cx + w / 2)), int(math.ceil(cy + h / 2))), glyphs)
+
+
+#효과음 렌더용: 색·테두리(sfx_colors)와 획 굵기
+def measure(page, pos):
+    color, outline, width, fill = sfx_colors(page, pos)
     if fill.sum() < 50:
         return None
     thick = stroke_width(fill)
@@ -331,7 +362,8 @@ def dedup(contents, textmask=None):
 
 
 def render_page(original, erased, contents):
-    """original·erased: PIL 페이지. contents: [{pos, mask_area?, word, translated, group?, letter?, mask?, font?, skew?, small?, stretch?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
+    """original·erased: PIL 페이지. contents: [{pos, mask_area?, word, translated, group?, letter?, mask?, font?, small?, stretch?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
+    폰트는 상자에 있으면 그 폰트, 없으면 FONT. 늘이기는 글자 마스크로 잰다(마스크가 없으면 1.0). 기울이기는 쓰지 않는다 (11-20 결정)
     폰트·기울이기·둘째 글자부터 크기 small·늘이기 stretch 는 상자에 있으면 그 값, 없으면 모델(기울이기·늘이기)과 고정값(폰트·small). 획 굵기는 원본에 맞춘다, 없으면 모델이 고른 글씨체의 기본값. 이은 상자(group 이 같음)는 가장 크게 잰 상자의
     글씨체만 같이 쓰고 나머지는 상자마다 따로. 회전은 원본 글자 줄의 기울기 그대로 (기울이기는 글자 모양만 바꾸고 회전에는 안 쓴다). 글자 마스크가 있으면 회전·크기를 그걸 감싸는 가장 작은 직사각형으로: 그 기울기로 돌리고, 그 안에서 키우다 닿으면 멈춘다"""
     page = original.convert("RGB")
@@ -360,7 +392,7 @@ def render_page(original, erased, contents):
                 letter[ay1 - by1:ay1 - by1 + k.shape[0], ax1 - bx1:ax1 - bx1 + k.shape[1]] = k
                 if letter.sum() < 50:
                     letter = None
-            m = measure(page, (max(0, px1), max(0, py1), min(W, px2), min(H, py2)))   # 색·테두리·굵기는 대사와 같은 방식으로 (글자 상자 기준)
+            m = measure(page, (max(0, px1), max(0, py1), min(W, px2), min(H, py2)))   # 효과음: SAM 2.1 마스크 → 직사각형 → 직사각형에서 색 (sfx_colors)
             if m is None:
                 continue
             #기울기는 글자 상자(pos) 안의 지운 어두운 잉크로 잰다 (지운 영역 mask_area 는 넓어서 옆 그림 선까지 걸리고, 흰 테두리는 방향을 흐린다)
@@ -368,11 +400,11 @@ def render_page(original, erased, contents):
             rect = None if letter is None else min_rect(letter)   # 글자 마스크가 있으면 회전·크기를 그걸 감싸는 직사각형으로 정한다
             m["tilt"] = tilt(diff_mask(pj, out[max(0, py1):py2, max(0, px1):px2]) & (pj.mean(2) < 100)) if rect is None else rect[4]
             items.append(dict(box=(bx1, by1, bx2, by2), region=region, lines=lines, m=m, c=c, group=c.get("group"), rect=rect, pos=(max(0, px1), max(0, py1), min(W, px2), min(H, py2))))
-        from Process.sfx_model import predict
-        for it, s in zip(items, predict(page, [it["pos"] for it in items])):   # 상자에 값이 있으면 그 값, 없으면 모델이 고른 것 (폰트·small 은 고정값)
+        for it in items:   # 상자에 값이 있으면 그 값
             c = it["c"]
-            it["font"] = c["font"] if c.get("font") in font_paths() else s["font"] if s["font"] in font_paths() else "Dokdo"
-            it["skew"], it["small"], it["stretch"] = float(c.get("skew", s["skew"])), float(c.get("small", s["small"])), float(c.get("stretch", s["stretch"]))
+            it["font"] = c["font"] if c.get("font") in font_paths() else FONT
+            it["skew"], it["small"] = 0.0, float(c.get("small", SMALL))
+            it["stretch"] = float(c["stretch"]) if "stretch" in c else stretch_of(it["rect"], c.get("word")) if it["rect"] else 1.0
         groups = {}
         for it in items:
             if it["group"] is not None:

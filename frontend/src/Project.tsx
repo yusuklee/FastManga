@@ -47,7 +47,7 @@ export type Content = {
 //폰트 선택지. regular/bold 는 백엔드 /fontfiles/ 아래 상대 경로 (없으면 시스템 폰트)
 export type FontChoice = { family: string; regular?: string | null; bold?: string | null };
 const DEFAULT_FONT: FontChoice = { family: "Malgun Gothic" };
-const DEFAULT_SFX_FONT = "Dokdo";   //백엔드 기본값(Process/sfx_model.FONT)과 같게
+const DEFAULT_SFX_FONT = "Dokdo";   //백엔드 기본값(Process/sfx_style.FONT)과 같게
 
 type PageContents = { [page: string]: Content[] };
 

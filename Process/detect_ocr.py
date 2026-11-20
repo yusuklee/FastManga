@@ -189,19 +189,17 @@ def ocr_boxes(image, boxes, ocr="hayai"):
         mask, letter = page_mask[ey1:ey2, ex1:ex2], False
         from Process.sfx_style import stroke_width
         # 글자 마스크 (11-19 결정): 대사는 전부 comic-text-detector, 효과음은 전부 SAM 2.1. 글자색·테두리·굵기를 정하는 방식은 둘이 같다 (enclosed_colors)
-        if b.get("sfx"):
+        if b.get("sfx"):   # 효과음: SAM 2.1 마스크 → 최적의 직사각형 → 직사각형에서 색 (11-20 결정)
             from Process import sam_mask
+            from Process.sfx_style import sfx_colors
             erase, mask = sam_mask.letter_mask(image, pos)   # 지우기도 SAM 2.1 마스크로
             letter = True                                    # 회전·크기도 이 마스크를 감싸는 가장 작은 직사각형으로 정한다 (11-19 결정: 탐지기가 잡은 상자도 사람이 그린 상자와 같게)
-            area, masks, _ = sam_mask.candidates(image, pos)
-            glyphs = np.zeros(arr.shape[:2], bool)
-            glyphs[area[1]:area[3], area[0]:area[2]] = masks[1]   # 색은 둘째 후보(가장 넓게 잡는 것)로
+            color, stroke, stroke_w, glyph = sfx_colors(image, pos)
             size = 0
-        else:
-            glyphs = page_mask
+        else:              # 대사: RF-DETR 상자에서 색
             count = len("".join(word.split()))   # 글자 크기 (11-19 결정): 글자 상자 넓이 ÷ 글자 수 의 제곱근 (글자 하나가 차지하는 정사각형의 한 변). 글자가 없으면 예전 방식(글자 줄 굵기)
             size = round(((pos[2] - pos[0]) * (pos[3] - pos[1]) / count) ** 0.5) if count else 0
-        color, stroke, stroke_w, glyph = enclosed_colors(arr, pos, glyphs)
+            color, stroke, stroke_w, glyph = enclosed_colors(arr, pos, page_mask)
         lines.append({
             **({"id": b["id"]} if "id" in b else {}),
             "pos": pos,
