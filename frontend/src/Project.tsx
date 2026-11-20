@@ -21,6 +21,7 @@ export type Content = {
   id: number;
   pos: area; //글자 상자 (OCR·번역·렌더용)
   word: string; //원문
+  box_word?: string; //이은 상자에서 이 상자만 따로 읽은 원문 (효과음 늘이기를 이 상자의 글자 수로 잰다)
   translated?: string; //번역문
   page: number;
   mask?: string; //글자 모양 (base64 PNG), 지우기용
@@ -47,7 +48,7 @@ export type Content = {
 //폰트 선택지. regular/bold 는 백엔드 /fontfiles/ 아래 상대 경로 (없으면 시스템 폰트)
 export type FontChoice = { family: string; regular?: string | null; bold?: string | null };
 const DEFAULT_FONT: FontChoice = { family: "Malgun Gothic" };
-const DEFAULT_SFX_FONT = "Dokdo";   //백엔드 기본값(Process/sfx_style.FONT)과 같게
+const DEFAULT_SFX_FONT = "Jua";   //백엔드 기본값(Process/sfx_style.FONT)과 같게
 
 type PageContents = { [page: string]: Content[] };
 
@@ -140,7 +141,7 @@ const post_pair = async (path: string, page: string, erased: string, contents: P
   return URL.createObjectURL(await r.blob());
 };
 const post_sfx = (page: string, erased: string, contents: Content[], sfxFont: string) =>   //sfxFont: 설정의 효과음 폰트. 상자에 폰트가 따로 정해져 있으면 그 폰트
-  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, translated, group, letter, mask, font }) => ({ pos, mask_area, word, translated, group, letter, mask: letter ? mask : undefined, font: font ?? sfxFont })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
+  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, box_word, translated, group, letter, mask, font }) => ({ pos, mask_area, word, box_word, translated, group, letter, mask: letter ? mask : undefined, font: font ?? sfxFont })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
 
 export function Project({
   project,

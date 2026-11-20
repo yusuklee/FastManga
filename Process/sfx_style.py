@@ -1,4 +1,4 @@
-#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·회전·크기·늘이기는 원본에서 잰다(늘이기 = SAM 2.1 글자 마스크 직사각형의 한 글자 칸 세로/가로). 폰트는 설정에서 고른 것(없으면 Dokdo), 기울이기는 쓰지 않는다
+#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·회전·크기·늘이기는 원본에서 잰다(늘이기 = SAM 2.1 글자 마스크 직사각형의 한 글자 칸 세로/가로). 폰트는 설정에서 고른 것(없으면 Jua), 기울이기는 쓰지 않는다
 import os, math, threading
 import numpy as np, cv2
 from PIL import Image, ImageDraw, ImageFont
@@ -9,7 +9,7 @@ _lock = threading.Lock()
 _cache = {}
 
 
-FONT, SMALL = "Dokdo", 0.9   # 설정에서 폰트가 안 오면 쓰는 폰트, 둘째 글자부터의 크기 비율
+FONT, SMALL = "Jua", 0.9   # 설정에서 폰트가 안 오면 쓰는 폰트, 둘째 글자부터의 크기 비율
 _SMALL_KANA = set("ッっャゃュゅョょァィゥェォぁぃぅぇぉヮゎ")
 _NOT_LETTER = set("ー〜~…・.。、,!?！？♡♥❤☆★「」『』()（） \u3000-")
 
@@ -182,6 +182,17 @@ def lum(c):
 
 
 #st: font·skew·small·stretch·rotate·color·outline·outline_w·thick. region: 상자 안 글자 자리(0~1)
+def lumi(c):   # 상대 휘도 0~1 (c: 0~255)
+    c = [v / 255 for v in c]
+    c = [v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4 for v in c]
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+
+def contrast(a, b):
+    la, lb = sorted((lumi(a), lumi(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
 def render_box(bg, lines, st, region):
     H, W = bg.shape[:2]
     x1, y1, x2, y2 = region[0] * W, region[1] * H, region[2] * W, region[3] * H
@@ -190,6 +201,17 @@ def render_box(bg, lines, st, region):
     m = text_block(font_paths()[st["font"]], lines, vertical, st["small"])
     m = shear_rotate(m, st["skew"], st["rotate"], st["stretch"])
     m = fit_region(m, rw, rh)
+    if st.get("plain"):   # 효과음 (11-20 결정): 획 굵기는 폰트 그대로, 테두리 = 글자 크기의 5.5% (0.35~4px)
+        size = (m.shape[1] if vertical else m.shape[0]) / max(1, len(lines))
+        thick = 1.0
+        color = rgb(st["color"])
+        m = np.pad(m, 8)
+        layers = [(grow(m, round(min(4.0, max(0.35, size * 0.055)), 1)), rgb(st["outline"])), (m, color)]
+        out = Image.fromarray(bg).convert("RGB")
+        px, py = int((x1 + x2) / 2 - m.shape[1] / 2), int((y1 + y2) / 2 - m.shape[0] / 2)
+        for mask, c in layers:
+            out.paste(c, (px, py), Image.fromarray(mask))
+        return np.array(out)
     thick = max(st["thick"], 1.0)
     cur = stroke_width(m > 127)   # 획 굵기를 원본에 맞춘다 (가는 획이 사라지지 않게 깎는 건 획의 1/4 까지)
     k = (thick - cur) / 2
@@ -399,12 +421,15 @@ def render_page(original, erased, contents):
             pj = src[max(0, py1):py2, max(0, px1):px2]
             rect = None if letter is None else min_rect(letter)   # 글자 마스크가 있으면 회전·크기를 그걸 감싸는 직사각형으로 정한다
             m["tilt"] = tilt(diff_mask(pj, out[max(0, py1):py2, max(0, px1):px2]) & (pj.mean(2) < 100)) if rect is None else rect[4]
+            col = rgb(m["color"])   # 글자색은 sfx_colors (직사각형 안 물 부어 가두기). 테두리 = 흰색(글자와 대비 3 미만이면 #111111), 굵기 = 글자 크기 5.5%, 획 굵기 = 폰트 그대로 (11-20 결정)
+            m["outline"] = [1.0, 1.0, 1.0] if contrast(col, (255, 255, 255)) >= 3 else [17 / 255] * 3
+            m["plain"] = True
             items.append(dict(box=(bx1, by1, bx2, by2), region=region, lines=lines, m=m, c=c, group=c.get("group"), rect=rect, pos=(max(0, px1), max(0, py1), min(W, px2), min(H, py2))))
         for it in items:   # 상자에 값이 있으면 그 값
             c = it["c"]
             it["font"] = c["font"] if c.get("font") in font_paths() else FONT
             it["skew"], it["small"] = 0.0, float(c.get("small", SMALL))
-            it["stretch"] = float(c["stretch"]) if "stretch" in c else stretch_of(it["rect"], c.get("word")) if it["rect"] else 1.0
+            it["stretch"] = float(c["stretch"]) if "stretch" in c else stretch_of(it["rect"], c["box_word"] if c.get("group") is not None and "box_word" in c else c.get("word")) if it["rect"] else 1.0
         groups = {}
         for it in items:
             if it["group"] is not None:
@@ -416,7 +441,7 @@ def render_page(original, erased, contents):
         for it in items:
             m = it["m"]
             st = dict(font=it["font"], skew=it["skew"], small=it["small"], stretch=it["stretch"], rotate=m["tilt"], color=m["color"], outline=m["outline"],
-                      outline_w=m["outline_w"], thick=m["thick"])
+                      outline_w=m["outline_w"], thick=m["thick"], plain=m.get("plain", False))
             bx1, by1, bx2, by2 = it["box"]
             region = rect_region(it["rect"], it["lines"], st, bx2 - bx1, by2 - by1) if it["rect"] else it["region"]
             out[by1:by2, bx1:bx2] = render_box(out[by1:by2, bx1:bx2], it["lines"], st, region)

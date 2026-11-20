@@ -178,9 +178,11 @@ def ocr_boxes(image, boxes, ocr="hayai"):
     for idx in groups.values():   # 묶음은 따로 읽는다 (다른 조각과 한 번에 읽으면 결과가 흔들림)
         idx.sort(key=lambda i: boxes[i].get("order") or 0)
         words[idx[0]] = ocr_texts([join_crops([crops[i] for i in idx])], ocr)[0]
+    #이은 상자는 상자마다 따로도 읽어 둔다: 효과음 늘이기를 그 상자의 글자 수로 재야 해서 (묶음 글자는 첫 상자에만 들어감)
+    box_words = dict(zip(sorted(grouped), ocr_texts([crops[i] for i in sorted(grouped)], ocr))) if grouped else {}
 
     lines = []
-    for b, pos, erase, word in zip(boxes, text_boxes, erase_boxes, words):
+    for i_, (b, pos, erase, word) in enumerate(zip(boxes, text_boxes, erase_boxes, words)):
         if not HAS_TEXT.search(word):
             if not b.get("user") and b.get("group") is None:
                 continue
@@ -212,7 +214,7 @@ def ocr_boxes(image, boxes, ocr="hayai"):
             **({"user": True} if b.get("user") else {}),
             **({"letter": True} if letter else {}),   # mask 가 글자 모양 그대로(선+속)다 → 효과음 렌더가 이 마스크로 색·굵기·기울기를 잰다
             **({"sfx": True} if b.get("sfx") else {}),
-            **({"group": b["group"], "order": b.get("order")} if b.get("group") is not None else {}),
+            **({"group": b["group"], "order": b.get("order"), "box_word": box_words.get(i_, "")} if b.get("group") is not None else {}),
             "font_size": size or font_size(line_map, ink, pos),
             "angle": text_angle(line_map, page_mask, pos),
             "color": color,
