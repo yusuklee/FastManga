@@ -320,11 +320,12 @@ export function renderPage(
     const base = fontThick(family) * size;
     const k = c.thick ? (c.thick * scale - base) / 2 : 0;
     const grow = k >= 0.5 ? k : k <= -0.5 ? -Math.min(-k, base / 4) : 0;   // + 면 획을 부풀리고 − 면 깎는다 (깎는 건 획의 1/4 까지, 효과음과 같은 규칙)
-    const edge = c.stroke ? (c.stroke_width ? c.stroke_width * scale : Math.max(2, size / 6) / 2) : 0;
-    const color = c.color ?? "#000";
+    const stroke = c.stroke_set !== undefined ? c.stroke_set : c.stroke;   // 글자 목록에서 고른 색이 있으면 그 색
+    const edge = stroke ? (c.stroke_width ? c.stroke_width * scale : Math.max(2, size / 6) / 2) : 0;
+    const color = c.color_set ?? c.color ?? "#000";
     const each = (draw: (line: string, x: number, y: number) => void) => lines.forEach((line, i) => draw(line, centers ? centers[i] - w / 2 : 0, top + (i + 0.5) * step));
-    if (c.stroke) {   // 테두리: (깎인) 글자 가장자리에서 edge 만큼 바깥까지
-      ctx.strokeStyle = ctx.fillStyle = c.stroke;
+    if (stroke) {   // 테두리: (깎인) 글자 가장자리에서 edge 만큼 바깥까지
+      ctx.strokeStyle = ctx.fillStyle = stroke;
       ctx.lineWidth = 2 * Math.max(0, edge + grow);
       each((line, x, y) => {
         if (edge + grow > 0) ctx.strokeText(line, x, y);

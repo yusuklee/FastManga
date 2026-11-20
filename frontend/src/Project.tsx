@@ -41,6 +41,8 @@ export type Content = {
   size?: number; //이 상자만 쓸 글자 크기(px). 없으면 영역에 맞춰 자동
   color?: string; //글자색
   stroke?: string | null; //테두리색 (원본 글자에 테두리가 있을 때)
+  color_set?: string; //사용자가 글자 목록에서 고른 글자색. 있으면 잰 색 대신 쓴다
+  stroke_set?: string | null; //사용자가 고른 테두리색. null = 테두리 없음, 없으면 잰 값
   stroke_width?: number | null; //원본 테두리 굵기(px). 없으면 글자 크기의 1/12 로 그린다
   thick?: number; //원본 획 굵기(px). 번역문 획을 이 굵기에 맞춘다
 };
@@ -141,7 +143,7 @@ const post_pair = async (path: string, page: string, erased: string, contents: P
   return URL.createObjectURL(await r.blob());
 };
 const post_sfx = (page: string, erased: string, contents: Content[], sfxFont: string) =>   //sfxFont: 설정의 효과음 폰트. 상자에 폰트가 따로 정해져 있으면 그 폰트
-  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, box_word, translated, group, letter, mask, font }) => ({ pos, mask_area, word, box_word, translated, group, letter, mask: letter ? mask : undefined, font: font ?? sfxFont })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
+  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, box_word, translated, group, letter, mask, font, color_set, stroke_set }) => ({ pos, mask_area, word, box_word, translated, group, letter, mask: letter ? mask : undefined, font: font ?? sfxFont, color_set, stroke_set })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
 
 export function Project({
   project,
@@ -475,7 +477,7 @@ const setErased = (page: string, image: string) => {
   //효과음 렌더 갱신: 지운 이미지가 있고 번역된 의성어 상자가 있으면 백엔드에 그려 달라고 한다. 조건이 전과 같으면 건너뜀
   const ensureSfx = async (page: string, contents = pageContents[page], erased = inpaintedImgs[page]) => {
     const targets = contents ? sfxTargets(contents) : [];
-    const key = erased && targets.length ? `${erased}|${sfxFont.family}|${targets.map((c) => `${c.id}:${c.translated}:${c.pos.join(",")}:${c.font ?? ""}`).join("|")}` : "";
+    const key = erased && targets.length ? `${erased}|${sfxFont.family}|${targets.map((c) => `${c.id}:${c.translated}:${c.pos.join(",")}:${c.font ?? ""}:${c.color_set ?? ""}:${c.stroke_set === undefined ? "auto" : c.stroke_set}`).join("|")}` : "";
     if (sfxKeys.current[page] === key) return;
     sfxKeys.current[page] = key;
     const image = key ? await prepareModels().then(() => post_sfx(page, erased!, contents!, sfxFont.family)).catch((e) => { setProgress(`SFX render error: ${(e as Error).message}`); return undefined; }) : undefined;

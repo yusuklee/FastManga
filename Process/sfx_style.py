@@ -1,4 +1,4 @@
-#효과음 렌더: 색·굵기·테두리(대사와 같은 방식, detect_ocr.enclosed_colors)·회전·크기·늘이기는 원본에서 잰다(늘이기 = SAM 2.1 글자 마스크 직사각형의 한 글자 칸 세로/가로). 폰트는 설정에서 고른 것(없으면 Jua), 기울이기는 쓰지 않는다
+#효과음 렌더: 글자색(SAM 2.1 마스크 직사각형 안 enclosed_colors)·회전·크기·늘이기는 원본에서 잰다. 테두리 = 흰색(글자와 대비 3 미만이면 #111111), 글자 크기의 5.5%. 획 굵기는 폰트 그대로, 기울이기는 쓰지 않는다. 글자 목록에서 고른 색(color_set·stroke_set)이 있으면 그 색
 import os, math, threading
 import numpy as np, cv2
 from PIL import Image, ImageDraw, ImageFont
@@ -85,7 +85,6 @@ SHIFT = (0.0, 0.16)  # 첫 글자·나머지 글자를 옆으로 어긋나게 (E
 GAP = 0.0           # 글자 사이 (EM 대비). 손 렌더와 비교해 0 이 가장 비슷
 SYM_GAP = 0.08      # ♡ 앞은 띄운다 (붙으면 작게 줄였을 때 「아♡」가 「앙」처럼 보인다)
 STRETCH = 1.0       # 상자를 채우려고 한쪽으로 늘리는 한도 (1 = 비율 유지. 11-12 손 렌더와 비교해 가장 비슷)
-HALO = 0.6          # 그림 위 글자에 두르는 테두리 굵기 (원본 획 굵기 대비)
 HEART_FONT = r"C:\Windows\Fonts\malgun.ttf"   # ♡ 는 폰트마다 모양이 달라서 하나로
 
 
@@ -177,11 +176,7 @@ def rgb(v):
     return tuple(int(np.clip(x, 0, 1) * 255) for x in v)
 
 
-def lum(c):
-    return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
-
-
-#st: font·skew·small·stretch·rotate·color·outline·outline_w·thick. region: 상자 안 글자 자리(0~1)
+#st: font·skew·small·stretch·rotate·color·outline. region: 상자 안 글자 자리(0~1)
 def lumi(c):   # 상대 휘도 0~1 (c: 0~255)
     c = [v / 255 for v in c]
     c = [v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4 for v in c]
@@ -201,32 +196,10 @@ def render_box(bg, lines, st, region):
     m = text_block(font_paths()[st["font"]], lines, vertical, st["small"])
     m = shear_rotate(m, st["skew"], st["rotate"], st["stretch"])
     m = fit_region(m, rw, rh)
-    if st.get("plain"):   # 효과음 (11-20 결정): 획 굵기는 폰트 그대로, 테두리 = 글자 크기의 5.5% (0.35~4px)
-        size = (m.shape[1] if vertical else m.shape[0]) / max(1, len(lines))
-        thick = 1.0
-        color = rgb(st["color"])
-        m = np.pad(m, 8)
-        layers = [(grow(m, round(min(4.0, max(0.35, size * 0.055)), 1)), rgb(st["outline"])), (m, color)]
-        out = Image.fromarray(bg).convert("RGB")
-        px, py = int((x1 + x2) / 2 - m.shape[1] / 2), int((y1 + y2) / 2 - m.shape[0] / 2)
-        for mask, c in layers:
-            out.paste(c, (px, py), Image.fromarray(mask))
-        return np.array(out)
-    thick = max(st["thick"], 1.0)
-    cur = stroke_width(m > 127)   # 획 굵기를 원본에 맞춘다 (가는 획이 사라지지 않게 깎는 건 획의 1/4 까지)
-    k = (thick - cur) / 2
-    m = grow(m, k) if k >= 0.5 else cv2.erode(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * int(min(-k, cur / 4)) + 1,) * 2)) if k <= -0.5 else m
-    color = rgb(st["color"])
-    m = np.pad(m, int(thick * 2.5) + 4)   # 테두리를 키울 자리
-    layers = []   # 바깥부터 (마스크, 색)
-    out_c, ow = (rgb(st["outline"]), st["outline_w"] * thick) if st["outline"] is not None else (None, 0)
-    if out_c is None:   # 테두리를 못 쟀는데 바탕이 그림이면(평평하지 않거나 글자색과 비슷하면) 반대색 테두리로 글자를 띄운다
-        L = lum(bg[int(y1):int(y2), int(x1):int(x2)].reshape(-1, 3).astype(np.float32).T)
-        if L.size and (L.std() > 25 or abs(L.mean() - lum(color)) < 90):
-            out_c, ow = ((0, 0, 0) if lum(color) > 127 else (255, 255, 255)), max(3, thick * HALO)
-    if out_c is not None and ow >= 1:
-        layers.append((grow(m, ow), out_c))
-    layers.append((m, color))
+    #효과음 (11-20 결정): 획 굵기는 폰트 그대로, 테두리 = 글자 크기의 5.5% (0.35~4px), outline 이 None 이면 테두리 없음
+    size = (m.shape[1] if vertical else m.shape[0]) / max(1, len(lines))
+    m = np.pad(m, 8)
+    layers = ([(grow(m, round(min(4.0, max(0.35, size * 0.055)), 1)), rgb(st["outline"]))] if st["outline"] is not None else []) + [(m, rgb(st["color"]))]
     out = Image.fromarray(bg).convert("RGB")
     px, py = int((x1 + x2) / 2 - m.shape[1] / 2), int((y1 + y2) / 2 - m.shape[0] / 2)
     for mask, c in layers:
@@ -265,15 +238,13 @@ def sfx_colors(page, pos):
     return enclosed_colors(arr, (int(cx - w / 2), int(cy - h / 2), int(math.ceil(cx + w / 2)), int(math.ceil(cy + h / 2))), glyphs)
 
 
-#효과음 렌더용: 색·테두리(sfx_colors)와 획 굵기
+#효과음 렌더용: 글자색(sfx_colors)과 글자 넓이
 def measure(page, pos):
     color, outline, width, fill = sfx_colors(page, pos)
     if fill.sum() < 50:
         return None
-    thick = stroke_width(fill)
     unit = lambda h: [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
-    return dict(tilt=0.0, area=int(fill.sum()), color=unit(color), outline=None if outline is None else unit(outline),
-                outline_w=(width or 0) / max(thick, 1), thick=thick)
+    return dict(tilt=0.0, area=int(fill.sum()), color=unit(color))
 
 
 #글자 줄의 기울기(도). 세로축 기준, + 면 아래가 오른쪽. 덩어리가 길쭉하지 않으면(글자 하나 등) 방향이 없어 0
@@ -384,10 +355,9 @@ def dedup(contents, textmask=None):
 
 
 def render_page(original, erased, contents):
-    """original·erased: PIL 페이지. contents: [{pos, mask_area?, word, translated, group?, letter?, mask?, font?, small?, stretch?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
-    폰트는 상자에 있으면 그 폰트, 없으면 FONT. 늘이기는 글자 마스크로 잰다(마스크가 없으면 1.0). 기울이기는 쓰지 않는다 (11-20 결정)
-    폰트·기울이기·둘째 글자부터 크기 small·늘이기 stretch 는 상자에 있으면 그 값, 없으면 모델(기울이기·늘이기)과 고정값(폰트·small). 획 굵기는 원본에 맞춘다, 없으면 모델이 고른 글씨체의 기본값. 이은 상자(group 이 같음)는 가장 크게 잰 상자의
-    글씨체만 같이 쓰고 나머지는 상자마다 따로. 회전은 원본 글자 줄의 기울기 그대로 (기울이기는 글자 모양만 바꾸고 회전에는 안 쓴다). 글자 마스크가 있으면 회전·크기를 그걸 감싸는 가장 작은 직사각형으로: 그 기울기로 돌리고, 그 안에서 키우다 닿으면 멈춘다"""
+    """original·erased: PIL 페이지. contents: [{pos, mask_area?, word, box_word?, translated, group?, letter?, mask?, font?, small?, stretch?, color_set?, stroke_set?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
+    폰트는 상자에 있으면 그 폰트, 없으면 FONT. 늘이기는 글자 마스크로 잰다(마스크가 없으면 1.0, 이은 상자는 box_word 글자 수). 기울이기는 쓰지 않는다
+    이은 상자(group 이 같음)는 가장 크게 잰 상자의 폰트만 같이 쓴다. 글자 마스크가 있으면 회전·크기를 그걸 감싸는 가장 작은 직사각형으로: 그 기울기로 돌리고, 그 안에서 키우다 닿으면 멈춘다"""
     page = original.convert("RGB")
     src = np.array(page)
     out = np.array(erased.convert("RGB"))
@@ -421,9 +391,12 @@ def render_page(original, erased, contents):
             pj = src[max(0, py1):py2, max(0, px1):px2]
             rect = None if letter is None else min_rect(letter)   # 글자 마스크가 있으면 회전·크기를 그걸 감싸는 직사각형으로 정한다
             m["tilt"] = tilt(diff_mask(pj, out[max(0, py1):py2, max(0, px1):px2]) & (pj.mean(2) < 100)) if rect is None else rect[4]
+            if c.get("color_set"):   # 사용자가 글자 목록에서 고른 글자색
+                m["color"] = [int(c["color_set"][i:i + 2], 16) / 255 for i in (1, 3, 5)]
             col = rgb(m["color"])   # 글자색은 sfx_colors (직사각형 안 물 부어 가두기). 테두리 = 흰색(글자와 대비 3 미만이면 #111111), 굵기 = 글자 크기 5.5%, 획 굵기 = 폰트 그대로 (11-20 결정)
             m["outline"] = [1.0, 1.0, 1.0] if contrast(col, (255, 255, 255)) >= 3 else [17 / 255] * 3
-            m["plain"] = True
+            if "stroke_set" in c:   # 사용자가 고른 테두리색 (null = 테두리 없음)
+                m["outline"] = None if not c["stroke_set"] else [int(c["stroke_set"][i:i + 2], 16) / 255 for i in (1, 3, 5)]
             items.append(dict(box=(bx1, by1, bx2, by2), region=region, lines=lines, m=m, c=c, group=c.get("group"), rect=rect, pos=(max(0, px1), max(0, py1), min(W, px2), min(H, py2))))
         for it in items:   # 상자에 값이 있으면 그 값
             c = it["c"]
@@ -440,8 +413,7 @@ def render_page(original, erased, contents):
                 it["font"] = lead["font"]
         for it in items:
             m = it["m"]
-            st = dict(font=it["font"], skew=it["skew"], small=it["small"], stretch=it["stretch"], rotate=m["tilt"], color=m["color"], outline=m["outline"],
-                      outline_w=m["outline_w"], thick=m["thick"], plain=m.get("plain", False))
+            st = dict(font=it["font"], skew=it["skew"], small=it["small"], stretch=it["stretch"], rotate=m["tilt"], color=m["color"], outline=m["outline"])
             bx1, by1, bx2, by2 = it["box"]
             region = rect_region(it["rect"], it["lines"], st, bx2 - bx1, by2 - by1) if it["rect"] else it["region"]
             out[by1:by2, bx1:bx2] = render_box(out[by1:by2, bx1:bx2], it["lines"], st, region)

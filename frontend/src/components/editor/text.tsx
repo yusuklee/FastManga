@@ -67,7 +67,7 @@ export const Text = memo(function Text({
                       <div className="mt-2" onClick={(e) => e.stopPropagation()}>
                         <p className="text-[10px] font-medium text-muted-foreground">Style{c.group != null && " (whole linked group)"}</p>
                         <div className="mt-0.5 flex overflow-hidden rounded-lg border text-xs">
-                          {([[true, "Auto", "Sound-effect style model picks the lettering"], [false, "Settings", "Font from Settings, original text size"]] as const).map(([sfx, label, tip]) => (
+                          {([[true, "Auto", "Sound-effect lettering measured from the original"], [false, "Settings", "Font from Settings, original text size"]] as const).map(([sfx, label, tip]) => (
                             <button key={label} type="button" title={tip} className={`flex-1 px-2 py-1 ${!!c.sfx === sfx ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`} onClick={() => onEdit(c.id, { sfx })}>{label}</button>
                           ))}
                         </div>
@@ -82,6 +82,18 @@ export const Text = memo(function Text({
                       onChange={(e) => onEdit(c.id, { translated: e.target.value })}
                       className="mt-0.5 w-full resize-y rounded-md border bg-background px-2 py-1 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
                     />
+                    <div className="mt-2 flex items-end gap-2" onClick={(e) => e.stopPropagation()}>
+                      <label>
+                        <p className="text-[10px] font-medium text-muted-foreground">Text color</p>
+                        <input type="color" value={c.color_set ?? (c.color && c.color.length === 7 ? c.color : "#000000")} onChange={(e) => onEdit(c.id, { color_set: e.target.value })} className="h-8 w-12 cursor-pointer rounded-lg border bg-background p-0.5" title="Text color" />
+                      </label>
+                      <label>
+                        <p className="text-[10px] font-medium text-muted-foreground">Outline</p>
+                        <input type="color" value={c.stroke_set ?? (c.stroke && c.stroke.length === 7 ? c.stroke : "#ffffff")} onChange={(e) => onEdit(c.id, { stroke_set: e.target.value })} className={`h-8 w-12 cursor-pointer rounded-lg border bg-background p-0.5 ${c.stroke_set === null ? "opacity-30" : ""}`} title="Outline color" />
+                      </label>
+                      <button type="button" className={`h-8 rounded-lg border px-2 text-xs hover:bg-muted ${c.stroke_set === null ? "bg-primary text-primary-foreground" : ""}`} onClick={() => onEdit(c.id, { stroke_set: null })} title="No outline">No outline</button>
+                      <button type="button" className="h-8 rounded-lg border px-2 text-xs hover:bg-muted" onClick={() => onEdit(c.id, { color_set: undefined, stroke_set: undefined })} title="Use the colors measured from the original">Auto</button>
+                    </div>
                     <div className="mt-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                       <div className="min-w-0 flex-1">
                         <p className="text-[10px] font-medium text-muted-foreground">Font</p>
