@@ -100,8 +100,26 @@ def detail(meta):
 router = APIRouter(prefix="/projects")
 
 
+SAMPLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample")   # 앱에 들어 있는 샘플 만화
+
+
+def ensure_sample():
+    """처음 한 번만 샘플 만화로 "Sample" 프로젝트를 만든다. 표시 파일(.sample_added)이 있으면 다시 안 만든다 → 지우면 안 돌아온다"""
+    marker = os.path.join(projects_root(), ".sample_added")
+    if os.path.exists(marker) or not os.path.isdir(SAMPLE_DIR):
+        return
+    files = sorted((f for f in os.listdir(SAMPLE_DIR) if f.lower().endswith(IMAGE_EXT)), key=natural_key)
+    if files and not os.path.exists(project_dir("Sample", must_exist=False)):
+        _create("Sample", [(f, os.path.join(SAMPLE_DIR, f)) for f in files])
+    open(marker, "w").close()
+
+
 @router.get("")
 def list_projects():
+    try:
+        ensure_sample()
+    except Exception as e:
+        print(f"[projects] sample project not created: {e}", flush=True)
     out = []
     for d in sorted(os.listdir(projects_root())):
         path = os.path.join(projects_root(), d, "project.json")

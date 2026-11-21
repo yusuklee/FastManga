@@ -46,6 +46,7 @@ def main(version, runtime=True):
     shutil.copytree(os.path.join(ROOT, "Process"), os.path.join(APP, "Process"), ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copytree(os.path.join(ROOT, "frontend", "dist"), os.path.join(APP, "frontend", "dist"))
     shutil.copytree(os.path.join(ROOT, "fonts"), os.path.join(APP, "fonts"), ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(os.path.join(ROOT, "sample"), os.path.join(APP, "sample"))   # 처음 켤 때 만드는 Sample 프로젝트 (projects.ensure_sample)
     with open(os.path.join(APP, "version.txt"), "w", encoding="utf-8") as f:   # 자동 업데이트가 쓰는 현재 버전
         f.write(version)
 
