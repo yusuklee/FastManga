@@ -9,9 +9,18 @@ _lock = threading.Lock()
 _cache = {}
 
 
-FONT, SMALL = "Jua", 0.9   # 설정에서 폰트가 안 오면 쓰는 폰트, 둘째 글자부터의 크기 비율
+FONT, SMALL = "Jua", 0.9   # 모르는 폰트 이름이 오면 쓰는 폰트, 둘째 글자부터의 크기 비율
+#효과음 폰트 Auto (11-22 결정, 설정의 기본값): 원본 글자 크기(font_size) ÷ 페이지 폭이 5% 이상이면 큰 글씨용, 미만이면 작은 글씨용 폰트
+AUTO, AUTO_BIG, AUTO_SMALL, AUTO_CUT = "Auto", "Mid Acacia C Bold", "Nanum Goding", 0.05
 _SMALL_KANA = set("ッっャゃュゅョょァィゥェォぁぃぅぇぉヮゎ")
 _NOT_LETTER = set("ー〜~…・.。、,!?！？♡♥❤☆★「」『』()（） \u3000-")
+
+
+def auto_font(size, page_w):
+    if not size:   # 글자 크기를 모르는 옛 상자
+        return FONT
+    name = AUTO_BIG if size / page_w >= AUTO_CUT else AUTO_SMALL
+    return name if name in font_paths() else FONT
 
 
 #늘이기 (11-20 결정): 글자 마스크를 감싸는 직사각형의 긴 변을 일본어 글자 수로 나눈 한 칸의 세로 ÷ 가로 (작은 글자 ッ·ュ 는 반 칸). 1.0~1.5
@@ -361,7 +370,7 @@ def dedup(contents, textmask=None):
 
 def render_page(original, erased, contents):
     """original·erased: PIL 페이지. contents: [{pos, mask_area?, word, box_word?, translated, group?, letter?, mask?, font?, small?, stretch?, color_set?, stroke_set?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
-    폰트는 상자에 있으면 그 폰트, 없으면 FONT. 늘이기는 글자 마스크로 잰다(마스크가 없으면 1.0, 이은 상자는 box_word 글자 수). 기울이기는 쓰지 않는다
+    폰트는 상자에 있으면 그 폰트, 없거나 Auto 면 글자 크기로 고른다(auto_font). 늘이기는 글자 마스크로 잰다(마스크가 없으면 1.0, 이은 상자는 box_word 글자 수). 기울이기는 쓰지 않는다
     이은 상자(group 이 같음)는 가장 크게 잰 상자의 폰트만 같이 쓴다. 글자 마스크가 있으면 회전·크기를 그걸 감싸는 가장 작은 직사각형으로: 그 기울기로 돌리고, 그 안에서 키우다 닿으면 멈춘다"""
     page = original.convert("RGB")
     src = np.array(page)
@@ -411,7 +420,8 @@ def render_page(original, erased, contents):
             items.append(dict(box=(bx1, by1, bx2, by2), region=region, lines=lines, m=m, c=c, group=c.get("group"), rect=rect, pos=(max(0, px1), max(0, py1), min(W, px2), min(H, py2))))
         for it in items:   # 상자에 값이 있으면 그 값
             c = it["c"]
-            it["font"] = c["font"] if c.get("font") in font_paths() else FONT
+            f = c.get("font")   # 폰트 이름이 오면 그 폰트, Auto(또는 없음)면 글자 크기로 고른다
+            it["font"] = f if f in font_paths() else auto_font(c.get("font_size"), W) if f in (None, "", AUTO) else FONT
             it["skew"], it["small"] = 0.0, float(c.get("small", SMALL))
             it["stretch"] = float(c["stretch"]) if "stretch" in c else stretch_of(it["rect"], c["box_word"] if c.get("group") is not None and "box_word" in c else c.get("word")) if it["rect"] else 1.0
         groups = {}

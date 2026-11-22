@@ -50,7 +50,8 @@ export type Content = {
 //폰트 선택지. regular/bold 는 백엔드 /fontfiles/ 아래 상대 경로 (없으면 시스템 폰트)
 export type FontChoice = { family: string; regular?: string | null; bold?: string | null };
 const DEFAULT_FONT: FontChoice = { family: "Malgun Gothic" };
-const DEFAULT_SFX_FONT = "Jua";   //백엔드 기본값(Process/sfx_style.FONT)과 같게
+const AUTO_SFX_FONT: FontChoice = { family: "Auto" };   //효과음 폰트 Auto: 백엔드가 글자 크기로 고른다 (Process/sfx_style.auto_font. 큰 글씨 Mid Acacia C Bold, 작은 글씨 Nanum Goding)
+const DEFAULT_SFX_FONT = AUTO_SFX_FONT.family;
 
 type PageContents = { [page: string]: Content[] };
 
@@ -311,6 +312,7 @@ export function Project({
   const [sfxFont, setSfxFont] = useState<FontChoice>(() => ({ family: loadSettings().sfxFontFamily ?? DEFAULT_SFX_FONT }));   //효과음은 백엔드가 그리니 이름만 있으면 된다
   const [allFont, setAllFont] = useState<FontChoice[]>([]);
   const fontChoices = useMemo(() => [DEFAULT_FONT, ...allFont], [allFont]);
+  const sfxFontChoices = useMemo(() => [AUTO_SFX_FONT, ...allFont], [allFont]);
   //설정·글꼴을 바꿀 때마다 localStorage 에. 글꼴 목록이 오면 저장해 둔 글꼴을 다시 고른다
   useEffect(() => saveSettings(settings, font.family, sfxFont.family), [settings, font.family, sfxFont.family]);
   useEffect(() => {
@@ -1061,7 +1063,7 @@ const setErased = (page: string, image: string) => {
         fonts={fontChoices}
         font={font}
         onFont={set_font}
-        sfxFonts={allFont}
+        sfxFonts={sfxFontChoices}
         sfxFont={sfxFont}
         onSfxFont={setSfxFont}
         onChange={setSettings}

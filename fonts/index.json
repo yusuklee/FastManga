@@ -80,8 +80,18 @@
   "bold": null
  },
  {
+  "family": "Mid Acacia C Bold",
+  "regular": "midacacia/MidAcaciaC-Bold.ttf",
+  "bold": null
+ },
+ {
   "family": "Nanum Brush Script",
   "regular": "nanumbrushscript/NanumBrushScript-Regular.ttf",
+  "bold": null
+ },
+ {
+  "family": "Nanum Goding",
+  "regular": "nanumgoding/NanumGoding-Regular.ttf",
   "bold": null
  },
  {
