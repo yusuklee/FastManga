@@ -196,6 +196,11 @@ def render_box(bg, lines, st, region):
     m = text_block(font_paths()[st["font"]], lines, vertical, st["small"])
     m = shear_rotate(m, st["skew"], st["rotate"], st["stretch"])
     m = fit_region(m, rw, rh)
+    if st.get("cap"):   # 글자 크기는 원본에서 잰 크기(font_size)를 넘지 않는다 (Settings 와 같은 상한, 11-22). 가로쓰기는 늘이기만큼 세로가 길어서 나눠서 잰다
+        em = (m.shape[1] if vertical else m.shape[0]) / max(1, len(lines)) / (1 if vertical else st["stretch"])
+        if em > st["cap"]:
+            k = st["cap"] / em
+            m = cv2.resize(m, (max(1, int(m.shape[1] * k)), max(1, int(m.shape[0] * k))), interpolation=cv2.INTER_AREA)
     #효과음 (11-20 결정): 획 굵기는 폰트 그대로, 테두리 = 글자 크기의 5.5% (0.35~4px), outline 이 None 이면 테두리 없음
     size = (m.shape[1] if vertical else m.shape[0]) / max(1, len(lines))
     m = np.pad(m, 8)
@@ -391,6 +396,12 @@ def render_page(original, erased, contents):
             pj = src[max(0, py1):py2, max(0, px1):px2]
             rect = None if letter is None else min_rect(letter)   # 글자 마스크가 있으면 회전·크기를 그걸 감싸는 직사각형으로 정한다
             m["tilt"] = tilt(diff_mask(pj, out[max(0, py1):py2, max(0, px1):px2]) & (pj.mean(2) < 100)) if rect is None else rect[4]
+            #회전 (11-22 결정): 글자 마스크 전체가 길게 퍼진 방향(주축, tilt). 길쭉하지 않아 주축이 없으면 CTD 글자 줄 기울기 angle (Settings 와 같은 값.
+            #화면은 시계 방향 +, 여기(PIL)는 반시계 + 라 부호를 뒤집는다). 둘 다 없으면 위의 직사각형 각도
+            if letter is not None and tilt(letter):
+                m["tilt"] = tilt(letter)
+            elif c.get("angle") is not None:
+                m["tilt"] = -float(c["angle"])
             if c.get("color_set"):   # 사용자가 글자 목록에서 고른 글자색
                 m["color"] = [int(c["color_set"][i:i + 2], 16) / 255 for i in (1, 3, 5)]
             col = rgb(m["color"])   # 글자색은 sfx_colors (직사각형 안 물 부어 가두기). 테두리 = 흰색(글자와 대비 3 미만이면 #111111), 굵기 = 글자 크기 5.5%, 획 굵기 = 폰트 그대로 (11-20 결정)
@@ -413,7 +424,7 @@ def render_page(original, erased, contents):
                 it["font"] = lead["font"]
         for it in items:
             m = it["m"]
-            st = dict(font=it["font"], skew=it["skew"], small=it["small"], stretch=it["stretch"], rotate=m["tilt"], color=m["color"], outline=m["outline"])
+            st = dict(font=it["font"], skew=it["skew"], small=it["small"], stretch=it["stretch"], rotate=m["tilt"], color=m["color"], outline=m["outline"], cap=it["c"].get("font_size"))
             bx1, by1, bx2, by2 = it["box"]
             region = rect_region(it["rect"], it["lines"], st, bx2 - bx1, by2 - by1) if it["rect"] else it["region"]
             out[by1:by2, bx1:bx2] = render_box(out[by1:by2, bx1:bx2], it["lines"], st, region)

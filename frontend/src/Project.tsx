@@ -143,7 +143,7 @@ const post_pair = async (path: string, page: string, erased: string, contents: P
   return URL.createObjectURL(await r.blob());
 };
 const post_sfx = (page: string, erased: string, contents: Content[], sfxFont: string) =>   //sfxFont: 설정의 효과음 폰트. 상자에 폰트가 따로 정해져 있으면 그 폰트
-  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, box_word, translated, group, letter, mask, font, color_set, stroke_set }) => ({ pos, mask_area, word, box_word, translated, group, letter, mask: letter ? mask : undefined, font: font ?? sfxFont, color_set, stroke_set })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
+  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, box_word, translated, group, letter, mask, font, font_size, angle, color_set, stroke_set }) => ({ pos, mask_area, word, box_word, translated, group, letter, mask: letter ? mask : undefined, font: font ?? sfxFont, font_size, angle, color_set, stroke_set })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
 
 export function Project({
   project,
