@@ -21,25 +21,16 @@ Packages, models and your projects stay inside the app folder (`%LOCALAPPDATA%\P
 > [!NOTE]
 > Works on any Windows 10/11 PC. With an NVIDIA GPU (driver 570 or newer, no CUDA toolkit needed) a page takes about a second. Without one it falls back to the CPU and is much slower.
 
-## setup
+## Examples
 
-![스크린샷 2026-09-25 005338.png](guide_imgs/%EC%8A%A4%ED%81%AC%EB%A6%B0%EC%83%B7%202026-09-25%20005338.png)![alt text](<스크린샷 2026-09-25 005338.png>)
+Japanese → Korean, translated with FastManga.
 
----
-
-![스크린샷 2026-09-25 005357.png](guide_imgs/%EC%8A%A4%ED%81%AC%EB%A6%B0%EC%83%B7%202026-09-25%20005357.png)![alt text](<스크린샷 2026-09-25 005357.png>)
-
----
-![스크린샷 2026-09-25 005427.png](guide_imgs/%EC%8A%A4%ED%81%AC%EB%A6%B0%EC%83%B7%202026-09-25%20005427.png)![alt text](<스크린샷 2026-09-25 005427.png>)
-
----
-
-![설정 버튼 위치.png](guide_imgs/%EC%84%A4%EC%A0%95%20%EB%B2%84%ED%8A%BC%20%EC%9C%84%EC%B9%98.png)![alt text](<설정 버튼 위치.png>)
-
----
-
-![스크린샷 2026-09-25 010132.png](guide_imgs/%EC%8A%A4%ED%81%AC%EB%A6%B0%EC%83%B7%202026-09-25%20010132.png)![alt text](<스크린샷 2026-09-25 010132.png>)
-
+<table>
+<tr><th>Original</th><th>Translated</th></tr>
+<tr><td><img src="demo/bluearchive_original.webp" alt="Blue Archive original"></td><td><img src="demo/bluearchive_translated.png" alt="Blue Archive translated"></td></tr>
+<tr><td><img src="demo/mha_original.png" alt="My Hero Academia original"></td><td><img src="demo/mha_translated.png" alt="My Hero Academia translated"></td></tr>
+<tr><td><img src="demo/spyfamily_original.png" alt="SPY×FAMILY original"></td><td><img src="demo/spyfamily_translated.png" alt="SPY×FAMILY translated"></td></tr>
+</table>
 
 ## How it works
 
