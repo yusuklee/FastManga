@@ -1,3 +1,4 @@
+import http.client
 import os
 import subprocess
 import threading
@@ -59,18 +60,52 @@ def watch_download(process, progress):
 
 
 
+PARTS = 4   # 큰 파일을 이만큼의 연결로 나눠 받는다. 연결 하나는 서버·거리 때문에 속도 한계가 있어서 (11-23)
+
+
+#url 을 dest 로 받는다: 파일을 PARTS 구간으로 나눠 구간마다 연결을 따로 열고(HTTP Range), 받은 조각을 제자리에 써넣는다
+#report(받은 바이트, 전체 바이트). 구간이 중간에 끊기면 받은 데서부터 다시 (구간마다 3번까지)
+def fetch(url, dest, report, parts=PARTS):
+    with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=30) as r:
+        total = int(r.headers["Content-Length"])
+    with open(dest, "wb") as f:
+        f.truncate(total)
+    got, lock = [0], threading.Lock()
+
+    def part(start, end):
+        pos = start
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(url, headers={"Range": f"bytes={pos}-{end}"})
+                with urllib.request.urlopen(req, timeout=30) as r, open(dest, "r+b") as f:
+                    if r.status != 206:
+                        raise OSError("the server ignored the Range request")
+                    f.seek(pos)
+                    while chunk := r.read(1 << 20):
+                        f.write(chunk)
+                        pos += len(chunk)
+                        with lock:
+                            got[0] += len(chunk)
+                            report(got[0], total)
+                if pos > end:
+                    return
+            except (OSError, http.client.HTTPException):
+                if attempt == 2:
+                    raise
+        raise OSError("download stopped early")
+
+    step = -(-total // parts)
+    with ThreadPoolExecutor(parts) as pool:
+        for job in [pool.submit(part, i * step, min(total, (i + 1) * step) - 1) for i in range(parts)]:
+            job.result()
+
+
 #downloaded: zip 을 다 받은 뒤 부른다 (풀기는 CPU 라 그동안 인터넷이 놀아서, 여기서 모델 받기를 시작한다)
 def install_runtime(progress, downloaded=lambda: None):
     os.makedirs(TMP, exist_ok=True)
     os.makedirs(PACKAGES, exist_ok=True)
     dest = os.path.join(TMP, "runtime.zip")
-    got = 0
-    with urllib.request.urlopen(RUNTIME_URL, timeout=30) as r, open(dest, "wb") as f:
-        total = int(r.headers["Content-Length"])
-        while chunk := r.read(1 << 20):
-            f.write(chunk)
-            got += len(chunk)
-            progress(f"Downloading PyTorch  {got / 1e9:.1f} GB / {total / 1e9:.1f} GB", int(100 * got / total))
+    fetch(RUNTIME_URL, dest, lambda got, total: progress(f"Downloading PyTorch  {got / 1e9:.1f} GB / {total / 1e9:.1f} GB", int(100 * got / total)))
     downloaded()
     # 앱(pythonw.exe) 안에서 풀면 python.exe 보다 2배 느려서 python.exe 로 푼다
     process = subprocess.Popen([PYTHON, "-c", "import sys; from Process.setup import unpack; unpack(sys.argv[1])", dest],

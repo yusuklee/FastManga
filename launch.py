@@ -66,9 +66,16 @@ def download_models(progress):
         list(pool.map(lambda m: snapshot_download(m[0], revision=m[2], allow_patterns=m[1], tqdm_class=Bar), hf_models()))
 
 
+PORT = 47615   # 앱 주소를 켤 때마다 같게: 설정·API 키는 화면의 localStorage 에 있고 주소(포트)별로 따로 저장돼서, 포트가 바뀌면 다 사라진 것처럼 보인다 (11-23)
+
+
+#고정 포트를 쓰고, 다른 프로그램이 이미 쓰고 있을 때만 빈 포트 (그때는 저장해 둔 설정이 안 보인다)
 def free_port():
     with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
+        try:
+            s.bind(("127.0.0.1", PORT))
+        except OSError:
+            s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
