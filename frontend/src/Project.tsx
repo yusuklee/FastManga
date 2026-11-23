@@ -2,7 +2,7 @@ import { Group, Panel, Separator } from "react-resizable-panels";
 import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text } from "./components/editor/text";
-import { SettingsDialog, DEFAULT_SETTINGS, PAGES_PER_CALL, loadKey, loadSettings, saveSettings, translateTarget, PROVIDERS, LOCAL_MODELS, type AppSettings } from "./components/editor/settings";
+import { SettingsDialog, DEFAULT_SETTINGS, PAGES_PER_CALL, loadKey, loadSettings, saveSettings, fetchSaved, postSaved, translateTarget, PROVIDERS, LOCAL_MODELS, type AppSettings, type SavedSettings } from "./components/editor/settings";
 import { SplitButton } from "./components/editor/splitbutton";
 import { ProcessDialog, type DetectWhat } from "./components/editor/processdialog";
 import { PageList } from "./components/editor/pagelist";
@@ -52,6 +52,14 @@ export type FontChoice = { family: string; regular?: string | null; bold?: strin
 const DEFAULT_FONT: FontChoice = { family: "Malgun Gothic" };
 const AUTO_SFX_FONT: FontChoice = { family: "Auto" };   //효과음 폰트 Auto: 백엔드가 글자 크기로 고른다 (Process/sfx_style.auto_font. 큰 글씨 Mid Acacia C Bold, 작은 글씨 Nanum Goding)
 const DEFAULT_SFX_FONT = AUTO_SFX_FONT.family;
+//저장돼 있던 설정을 지금 버전에 맞춘다: 없는 값은 기본값, 지금 목록에 없는 값(예전 버전)도 기본값으로
+const normalizeSettings = (saved: Partial<AppSettings>): AppSettings => {
+  const provider = saved.provider && saved.provider in PROVIDERS ? saved.provider : "gemini";
+  const localModel = LOCAL_MODELS.some((m) => m.id === saved.localModel) ? saved.localModel! : DEFAULT_SETTINGS.localModel;
+  const ocr = saved.ocr === "paddle" ? "paddle" : "hayai";
+  const claudeModel = PROVIDERS.claude.models.includes(saved.claudeModel ?? "") ? saved.claudeModel! : DEFAULT_SETTINGS.claudeModel;
+  return { ...DEFAULT_SETTINGS, ...saved, provider, localModel, ocr, claudeModel };
+};
 
 type PageContents = { [page: string]: Content[] };
 
@@ -250,12 +258,7 @@ export function Project({
   //설정 (⚙ 버튼으로 여는 창): 원본→번역 언어, 인페인팅 모델
   const [settings, setSettings] = useState<AppSettings>(() => {
     const { fontFamily: _f, sfxFontFamily: _s, ...saved } = loadSettings();
-    //예전 버전에서 저장된 값이 지금 목록에 없으면 기본값으로
-    const provider = saved.provider && saved.provider in PROVIDERS ? saved.provider : "gemini";
-    const localModel = LOCAL_MODELS.some((m) => m.id === saved.localModel) ? saved.localModel! : DEFAULT_SETTINGS.localModel;
-    const ocr = saved.ocr === "paddle" ? "paddle" : "hayai";
-    const claudeModel = PROVIDERS.claude.models.includes(saved.claudeModel ?? "") ? saved.claudeModel! : DEFAULT_SETTINGS.claudeModel;
-    return { ...DEFAULT_SETTINGS, ...saved, provider, localModel, ocr, claudeModel, apiKey: loadKey("gemini"), gptKey: loadKey("chatgpt"), claudeKey: loadKey("claude"), openaiKey: loadKey("openai") };
+    return normalizeSettings({ ...saved, apiKey: loadKey("gemini"), gptKey: loadKey("chatgpt"), claudeKey: loadKey("claude"), openaiKey: loadKey("openai") });
   });
   const target = translateTarget(settings);
   const modelName = target.model || settings.provider;
@@ -315,11 +318,20 @@ export function Project({
   const sfxFontChoices = useMemo(() => [AUTO_SFX_FONT, ...allFont], [allFont]);
   //설정·글꼴을 바꿀 때마다 localStorage 에. 글꼴 목록이 오면 저장해 둔 글꼴을 다시 고른다
   useEffect(() => saveSettings(settings, font.family, sfxFont.family), [settings, font.family, sfxFont.family]);
-  useEffect(() => {
-    const saved = loadSettings().fontFamily;
-    const f = saved && fontChoices.find((c) => c.family === saved);
-    if (f) set_font(f);
-  }, [fontChoices]);
+  useEffect(() => {   // 이름만 아는 글꼴(저장돼 있던 것)은 글꼴 목록이 오면 파일 경로까지 채운다
+    const f = fontChoices.find((c) => c.family === font.family);
+    if (f && f.regular && !font.regular) set_font(f);
+  }, [fontChoices, font]);
+  //설정 파일(앱 폴더 settings.json, 백엔드 /settings): 앱이 뜨면 읽어서 채우고, 설정 창의 저장 버튼이 쓴다. 앱 주소가 바뀌어도 남는다
+  //savedText = 파일에 있는 값. 지금 값과 다르면 설정 창이 나갈 때 저장할지 묻는다
+  const [savedText, setSavedText] = useState<string | null>(null);
+  const nowSaved = (): SavedSettings => ({ ...settings, fontFamily: font.family, sfxFontFamily: sfxFont.family });
+  const settingsDirty = savedText !== null && JSON.stringify(nowSaved()) !== savedText;
+  const applySaved = ({ fontFamily, sfxFontFamily, ...s }: SavedSettings) => {
+    setSettings(s);
+    set_font({ family: fontFamily });
+    setSfxFont({ family: sfxFontFamily });
+  };
 
   //백엔드가 뜰 때까지 2초마다 확인하며 안내 문구를 띄운다
   const [backendUp, setBackendUp] = useState(false);
@@ -352,6 +364,20 @@ export function Project({
     }
     setSetup(null);
   };
+
+  useEffect(() => {
+    if (!backendUp) return;
+    fetchSaved().then(({ fontFamily, sfxFontFamily, ...rest }) => {
+      if (Object.keys(rest).length) {
+        const full: SavedSettings = { ...normalizeSettings(rest), fontFamily: fontFamily ?? DEFAULT_FONT.family, sfxFontFamily: sfxFontFamily ?? DEFAULT_SFX_FONT };
+        applySaved(full);
+        setSavedText(JSON.stringify(full));
+      } else {   // 파일이 아직 없다 (처음 켬, 예전 버전에서 올라옴): 지금 값을 파일로 옮긴다
+        const now = nowSaved();
+        postSaved(now).then(() => setSavedText(JSON.stringify(now))).catch(() => {});
+      }
+    }).catch(() => {});
+  }, [backendUp]);
 
   useEffect(() => {
     if (!backendUp) return;
@@ -1068,6 +1094,13 @@ const setErased = (page: string, image: string) => {
         onSfxFont={setSfxFont}
         onChange={setSettings}
         needKey={needKey}
+        dirty={settingsDirty}
+        onSave={() => {
+          const now = nowSaved();
+          postSaved(now).then(() => setSavedText(JSON.stringify(now))).catch((e) => setProgress(`Settings not saved: ${(e as Error).message}`));
+          setSettingsOpen(false); setNeedKey(false);
+        }}
+        onDiscard={() => { if (savedText) applySaved(JSON.parse(savedText)); setSettingsOpen(false); setNeedKey(false); }}
         onClose={() => { setSettingsOpen(false); setNeedKey(false); }}
       />
 

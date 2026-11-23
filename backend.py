@@ -177,6 +177,24 @@ def save_api_key(api_key:str=Form(...)):
     os.environ["GEMINI_API_KEY"] = api_key
 
 
+#설정 창의 값(제공자·모델·언어·폰트·API 키)을 앱 폴더의 settings.json 에 둔다. 화면 저장소(localStorage)는 앱 주소(포트)가 바뀌면 안 보여서 (11-23)
+SETTINGS = os.path.join(ROOT, "settings.json")
+@app.post("/settings")
+def save_settings(data:dict):
+    with open(SETTINGS, "w", encoding="utf-8")as f:
+        json.dump(data,f,ensure_ascii=False,indent=1)
+    return {"ok":True}
+
+
+@app.get("/settings")
+def load_settings():
+    if not os.path.exists(SETTINGS):
+        return {}
+    else:
+        with open(SETTINGS,"r",encoding="utf-8")as f:
+            return json.load(f)
+
+
 if os.path.isdir(FONTS_DIR):
     app.mount("/fontfiles", StaticFiles(directory=FONTS_DIR), name="fontfiles")
 

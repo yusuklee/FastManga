@@ -79,7 +79,15 @@ export const saveSettings = (s: AppSettings, fontFamily: string, sfxFontFamily: 
 export const loadKey = (p: Provider) => { try { return localStorage.getItem(`${p}_api_key`) ?? ""; } catch { return ""; } };
 const saveKey = (p: Provider, k: string) => { try { k ? localStorage.setItem(`${p}_api_key`, k) : localStorage.removeItem(`${p}_api_key`); } catch { /* 저장 못 해도 동작엔 지장 없음 */ } };
 
-//OK 버튼: 키를 백엔드로 보내 .env 에 저장 (앱을 껐다 켜도 서버가 이 키를 쓴다)
+//설정 창의 값 전부(설정·폰트 이름·API 키)를 앱 폴더의 settings.json 에 둔다 (백엔드 /settings). 앱 주소가 바뀌어도 남는다
+export type SavedSettings = AppSettings & { fontFamily: string; sfxFontFamily: string };
+export const fetchSaved = (): Promise<Partial<SavedSettings>> => fetch(`${API}/settings`).then((r) => r.json());
+export const postSaved = async (data: SavedSettings) => {
+  const r = await fetch(`${API}/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  if (!r.ok) throw new Error(`settings: ${r.status}`);
+};
+
+//저장 버튼: Gemini 키는 백엔드로도 보내 .env 에 저장 (앱을 껐다 켜도 서버가 이 키를 쓴다)
 const postApiKey = async (k: string) => {
   const body = new FormData();
   body.append("api_key", k);
@@ -168,6 +176,9 @@ export const SettingsDialog = memo(function SettingsDialog({
   onSfxFont,
   onChange,
   needKey,
+  dirty,
+  onSave,
+  onDiscard,
   onClose,
 }: {
   open: boolean;
@@ -180,6 +191,9 @@ export const SettingsDialog = memo(function SettingsDialog({
   onSfxFont: (f: FontChoice) => void;
   onChange: (s: AppSettings) => void;
   needKey?: boolean; //번역이 API 키 때문에 실패해서 열림 → Models 탭, 키 칸 옆 빛나는 표시와 경고
+  dirty: boolean; //저장된 값(settings.json)과 지금 값이 다름
+  onSave: () => void; //지금 값을 저장하고 닫는다
+  onDiscard: () => void; //저장된 값으로 되돌리고 닫는다
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("language");
@@ -187,20 +201,24 @@ export const SettingsDialog = memo(function SettingsDialog({
   const [customCalls, setCustomCalls] = useState(typeof settings.calls === "number" && !CALL_PRESETS.includes(settings.calls as never));
   const [customStr, setCustomStr] = useState(typeof settings.calls === "number" ? String(settings.calls) : "3");
 
-  //Esc 로 닫기
+  //✕·Esc·바깥 클릭으로 나갈 때: 바뀐 게 있으면 저장할지 묻고, 없으면 그냥 닫는다
+  const [ask, setAsk] = useState(false);
+  useEffect(() => { if (!open) setAsk(false); }, [open]);
+  const leave = () => (dirty ? setAsk(true) : onClose());
+  const save = () => { if (settings.apiKey) postApiKey(settings.apiKey).catch(() => {}); onSave(); };
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { if (ask) setAsk(false); else leave(); } };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, ask, dirty, onClose]);
 
   if (!open) return null;
   const set = (patch: Partial<AppSettings>) => onChange({ ...settings, ...patch });
   const t = translator(settings.ui);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onMouseDown={leave}>
       <div className="flex h-[30rem] w-[42rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border bg-background shadow-2xl" onMouseDown={(e) => e.stopPropagation()}>
         {/* 왼쪽: 영역 탭 */}
         <aside className="flex w-40 shrink-0 flex-col border-r bg-muted/40 p-2">
@@ -221,7 +239,7 @@ export const SettingsDialog = memo(function SettingsDialog({
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-11 shrink-0 items-center justify-between border-b px-5">
             <h2 className="text-sm font-semibold">{t(TABS.find((tb) => tb.id === tab)!.label)}</h2>
-            <button className="rounded px-1.5 text-muted-foreground hover:bg-muted" onClick={onClose} title={t("Close")}>✕</button>
+            <button className="rounded px-1.5 text-muted-foreground hover:bg-muted" onClick={leave} title={t("Close")}>✕</button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-5">
             {tab === "language" && (
@@ -385,10 +403,21 @@ export const SettingsDialog = memo(function SettingsDialog({
             )}
           </div>
           <div className="flex h-12 shrink-0 items-center justify-end border-t px-5">
-            <Button size="sm" onClick={() => { if (settings.apiKey) postApiKey(settings.apiKey).catch(() => {}); onClose(); }}>{t("OK")}</Button>
+            <Button size="sm" onClick={save}>{t("OK")}</Button>
           </div>
         </div>
       </div>
+      {ask && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40" onMouseDown={(e) => e.stopPropagation()}>
+          <div className="w-80 rounded-xl border bg-background p-5 shadow-2xl">
+            <p className="text-sm">{t("Save the changed settings?")}</p>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button size="sm" variant="outline" onClick={onDiscard}>{t("No")}</Button>
+              <Button size="sm" onClick={save}>{t("Yes")}</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 });
