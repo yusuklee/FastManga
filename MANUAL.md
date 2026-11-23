@@ -5,7 +5,7 @@
 ## 1. 번역
 - 우상단에 있는 process 버튼을 눌러주세요  
 <br>
-![alt text](설명1.png)
+![alt text](manual/설명1.png)
   
 
 - 현재 페이지가 기본으로 선택이 됩니다.

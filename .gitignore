@@ -21,3 +21,12 @@ settings.json
 CLAUDE.md
 text_color.py
 .claude/
+
+# 매뉴얼에서 안 쓰는 그림 (로컬에만 둠)
+/image.png
+/image-1.png
+/image-2.png
+/image-3.png
+/image-4.png
+/image-5.png
+/image-6.png
