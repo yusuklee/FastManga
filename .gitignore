@@ -16,3 +16,8 @@ sample/
 llama/
 webview/
 settings.json
+
+# 저장소에 올리지 않는 작업용 파일
+CLAUDE.md
+text_color.py
+.claude/

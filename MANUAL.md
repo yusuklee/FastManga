@@ -1,17 +1,11 @@
 # Manual
 
 
-<!-- 스크린샷은 manual/ 폴더에 넣고 아래 TODO 자리의 주석을 풀면 됩니다 -->
-
-
-
-
-<!-- TODO: ![Start screen](manual/01_projects.png) -->
 
 ## 1. 번역
 - 우상단에 있는 process 버튼을 눌러주세요  
 <br>
-![alt text](manual/설명1.png)
+![alt text](설명1.png)
   
 
 - 현재 페이지가 기본으로 선택이 됩니다.
