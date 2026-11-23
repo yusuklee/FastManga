@@ -4,7 +4,6 @@
 
 ## 1. 번역
 - 우상단에 있는 process 버튼을 눌러주세요  
-<br>
 ![alt text](manual/설명1.png)
   
 
