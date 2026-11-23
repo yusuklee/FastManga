@@ -21,6 +21,9 @@ Packages, models and your projects stay inside the app folder (`%LOCALAPPDATA%\P
 > [!NOTE]
 > Works on any Windows 10/11 PC. With an NVIDIA GPU (driver 570 or newer, no CUDA toolkit needed) a page takes about a second. Without one it falls back to the CPU and is much slower.
 
+## Manual
+[사용 설명서](MANUAL.md)
+
 ## Examples
 
 Japanese → Korean, translated with FastManga.
