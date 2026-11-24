@@ -21,7 +21,7 @@ def setup_env():
     os.environ.setdefault("MANGA_PROJECTS_DIR", os.path.join(DATA, "projects"))
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     os.environ.setdefault("LAMA_MODEL", os.path.join(ROOT, "anime-manga-big-lama.pt"))
-    os.environ.setdefault("CTD_MODEL", os.path.join(ROOT, "comictextdetector.pt.onnx"))
+    os.environ.setdefault("CTD_MODEL", os.path.join(ROOT, "comictextdetector.jit.pt"))
     os.makedirs(os.path.join(ROOT, "packages"), exist_ok=True)   # 없으면 파이썬이 이 경로를 영영 안 봐서 설치 직후 import 가 실패
     sys.path.insert(0, os.path.join(ROOT, "packages"))
 

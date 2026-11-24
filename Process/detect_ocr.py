@@ -12,12 +12,30 @@ from dotenv import load_dotenv
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from rfdetr import RFDETRSeg2XLarge
+from rfdetr.models.postprocess import PostProcess
 
 load_dotenv()
 
 HAS_TEXT = re.compile(r'[ぁ-んァ-ヶ一-龯가-힣0-9A-Za-z]')
 
 _rfdetr = None
+
+
+#RF-DETR 는 후보 160개의 마스크를 전부 페이지 크기로 키운 뒤에 점수 낮은 것을 버린다 (큰 페이지에서 2.8GB)
+#점수는 마스크와 상관없이 먼저 정해지므로, 먼저 버리고 남은 것만 키운다 (결과는 같다)
+class KeepThenResize(PostProcess):
+    def forward(self, outputs, target_sizes):
+        import torch
+        import torch.nn.functional as F
+        logits, masks = outputs["pred_logits"], outputs["pred_masks"]
+        results = super().forward({"pred_logits": logits, "pred_boxes": outputs["pred_boxes"]}, target_sizes)   # 마스크 없이: 점수·종류·상자만
+        picked = torch.topk(logits.sigmoid().view(logits.shape[0], -1), self.num_select, dim=1)[1] // logits.shape[2]   # 후보마다 몇 번째 마스크인가
+        for i, r in enumerate(results):
+            keep = r["scores"] > THRESHOLD
+            h, w = target_sizes[i].tolist()
+            r.update(scores=r["scores"][keep], labels=r["labels"][keep], boxes=r["boxes"][keep],
+                     masks=F.interpolate(masks[i][picked[i][keep]].unsqueeze(1), size=(int(h), int(w)), mode="bilinear", align_corners=False) > 0.0)
+        return results
 
 
 def get_rfdetr():
@@ -29,6 +47,7 @@ def get_rfdetr():
             strict=True,
         )
         m.model.class_names = ["text", "onomatopoeia", "bubble", "panel"]
+        m.model.postprocess = KeepThenResize(num_select=m.model.postprocess.num_select)
         if m.model.device.type == "cuda":
             import torch
             m.optimize_for_inference(compile=False, dtype=torch.float16)
@@ -369,7 +388,9 @@ def expand_RF(labels, bbox, box):
 
 
 
-CTD_MODEL = os.environ.get("CTD_MODEL", "comictextdetector.pt.onnx")
+#dmMaze/comic-text-detector 의 comictextdetector.pt 를 TorchScript 파일 하나로 옮긴 것 (글자 마스크·글자 줄을 내는 부분만. 모델 코드 없이 돈다)
+#(11-25: onnxruntime 으로 돌리던 onnx 를 바꿈. onnx 는 1.16GB 를 잡고 놓지 않았다 → 토치 16비트는 0.3GB, 창고 비우기로 같이 비워진다. 29쪽 320개: 읽은 글자·색·굵기 전부 같음)
+CTD_MODEL = os.environ.get("CTD_MODEL", "comictextdetector.jit.pt")
 CTD_SIZE = 1024
 BINARY_THRESHOLD = 60 / 255
 CLOSE_RADIUS = 10
@@ -379,16 +400,36 @@ _ctd = None
 def get_ctd():
     global _ctd
     if _ctd is None:
-        import torch          # torch 가 묶어 온 CUDA/cuDNN DLL 을 먼저 올려야 onnxruntime-gpu 가 GPU 를 잡음
-        import onnxruntime as ort
+        import torch
         path = CTD_MODEL
         if not os.path.exists(path):
             path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), CTD_MODEL)
-        _ctd = ort.InferenceSession(path, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        cuda = torch.cuda.is_available()   # GPU 에서는 16비트(fp16)로 돌린다
+        torch._C._jit_set_profiling_executor(False)   # LaMa 와 같은 설정 (inpaint.get_lama)
+        torch._C._jit_set_profiling_mode(False)
+        m = torch.jit.load(path, map_location="cuda" if cuda else "cpu").eval()
+        _ctd = m.half() if cuda else m
     return _ctd
 
 
+#상자 찾기·글자 읽기 모델(RF-DETR, CTD, HAYAI, SAM 2.1)을 그래픽카드에서 내린다. 다음에 쓸 때 저절로 다시 올라간다 (합쳐서 4초쯤)
+#지우기를 시작할 때 그래픽카드 메모리가 모자라면 부른다 (inpaint.inpaint_lama)
+def unload():
+    global _rfdetr, _ctd
+    import gc, torch
+    from Process import hayai, sam_mask
+    if _rfdetr is None and _ctd is None and hayai._model is None and sam_mask._model is None:
+        return
+    _rfdetr = _ctd = None
+    with hayai._lock:
+        hayai._model = hayai._processor = hayai._tokenizer = None
+    sam_mask._model = sam_mask._processor = None   # sam_mask._cache (구해 둔 마스크)는 그대로 둔다: 효과음 렌더가 다시 쓴다
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def get_word_line_maps(image):
+    import torch
     W, H = image.size
     s = CTD_SIZE / max(W, H)
     rw, rh = round(W * s), round(H * s)
@@ -397,9 +438,13 @@ def get_word_line_maps(image):
     canvas[:rh, :rw] = np.array(image.convert("RGB").resize((rw, rh)))
     inp = canvas.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
 
-    _, word, line = get_ctd().run(None, {"images": inp})
+    model = get_ctd()
+    first = next(model.parameters())
+    with torch.inference_mode():
+        word, line = model(torch.from_numpy(inp).to(first.device, first.dtype))
+    word, line = word[0, 0].float().cpu().numpy(), line[0, 0].float().cpu().numpy()
     up = lambda m: cv2.resize(m[:rh, :rw], (W, H), interpolation=cv2.INTER_LINEAR)
-    return up(word[0, 0]), up(line[0, 0])
+    return up(word), up(line)
 
 
 def square(r):

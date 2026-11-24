@@ -10,7 +10,6 @@
 
 ## Install
 
-1. [Download Install-FastManga.exe](https://github.com/yusuklee/FastManga/releases/latest/download/Install-FastManga.exe) and run it. No admin rights needed.
 2. The first start downloads PyTorch with CUDA (about 3 GB, one time, from the same release) and shows the progress. The first time you press **PROCESS** it downloads the detection and OCR models (about 0.8 GB).
 3. Open **Settings** and paste your API key ([Gemini](https://aistudio.google.com/apikey), [Claude](https://platform.claude.com/settings/keys) or OpenAI).
 

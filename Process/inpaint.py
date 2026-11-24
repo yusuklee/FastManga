@@ -84,6 +84,7 @@ def call_lama(crops, masks):
 
 BUCKET = 64     # 조각 크기를 이 단위로 올림해서 같은 크기끼리 묶는다
 MAX_BATCH = 8
+LAMA_NEED = 2.8 * 1024 ** 3   # 지우기 작업이 쓰는 그래픽카드 메모리 (11-25 가장 무거운 f7 6쪽: 768x768 조각 4개 묶음에서 2.8GB)
 
 
 def inpaint_lama(image, contents, tile=TILE):
@@ -116,7 +117,14 @@ def inpaint_lama(image, contents, tile=TILE):
                 cx1, cy1, cx2, cy2 = max(0, x1 - CTX), max(0, y1 - CTX), min(w, x2 + CTX), min(h, y2 + CTX)
                 key = (-(-(cy2 - cy1) // BUCKET) * BUCKET, -(-(cx2 - cx1) // BUCKET) * BUCKET)
                 groups.setdefault(key, []).append((x1, y1, x2, y2, cx1, cy1, cx2, cy2))
-    for (BH, BW), jobs in groups.items():
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()   # 앞 단계·앞 페이지가 쓰고 남긴 빈 메모리를 돌려주고 시작한다
+        if groups and torch.cuda.mem_get_info()[0] < LAMA_NEED:   # 그래도 남은 그래픽카드 메모리가 모자라면 지우기에 안 쓰는 모델을 내린다
+            from Process import detect_ocr
+            detect_ocr.unload()
+    #큰 묶음부터 돌린다: 작은 것부터 돌리면 뒤의 큰 묶음이 앞에서 받아 둔 메모리에 안 들어가 새로 받아 와서 쌓인다 (f7 6쪽 6.5GB → 큰 것부터면 뒤 묶음이 빈자리에 들어감)
+    for (BH, BW), jobs in sorted(groups.items(), key=lambda g: -min(len(g[1]), MAX_BATCH) * g[0][0] * g[0][1]):
         for i in range(0, len(jobs), MAX_BATCH):
             chunk = jobs[i:i + MAX_BATCH]
             crops, masks = [], []

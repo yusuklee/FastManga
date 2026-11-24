@@ -3,7 +3,7 @@
 test.py
 anime-manga-big-lama.pt
 models/
-comictextdetector.pt.onnx
+comictextdetector.jit.pt
 flux2-klein-8bit/
 fonts_cache.json
 __pycache__/
