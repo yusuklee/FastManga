@@ -84,7 +84,9 @@ def call_lama(crops, masks):
 
 BUCKET = 64     # 조각 크기를 이 단위로 올림해서 같은 크기끼리 묶는다
 MAX_BATCH = 8
-LAMA_NEED = 2.8 * 1024 ** 3   # 지우기 작업이 쓰는 그래픽카드 메모리 (11-25 가장 무거운 f7 6쪽: 768x768 조각 4개 묶음에서 2.8GB)
+LAMA_NEED = 2.8 * 1024 ** 3   # 지우기 작업이 쓰는 그래픽카드 메모리 (11-25 f7 6쪽: 768x768 조각 4개 묶음에서 2.8GB). 남은 메모리가 이보다 적으면 다른 모델을 내린다
+BATCH_LIMIT = 3.0 * 1024 ** 3   # 묶음 하나의 예상 메모리 한도. 넘으면 반으로 쪼갠다
+PIXEL_BYTES = 0.72 * 1024 ** 3 / (768 * 768)   # 조각의 픽셀 하나가 잡는 그래픽카드 메모리 (11-25 잰 값: 768x768 조각 하나 0.72GB. 4개 묶음 2.9GB, 8개 묶음 5.8GB)
 
 
 def inpaint_lama(image, contents, tile=TILE):
@@ -123,17 +125,22 @@ def inpaint_lama(image, contents, tile=TILE):
         if groups and torch.cuda.mem_get_info()[0] < LAMA_NEED:   # 그래도 남은 그래픽카드 메모리가 모자라면 지우기에 안 쓰는 모델을 내린다
             from Process import detect_ocr
             detect_ocr.unload()
-    #큰 묶음부터 돌린다: 작은 것부터 돌리면 뒤의 큰 묶음이 앞에서 받아 둔 메모리에 안 들어가 새로 받아 와서 쌓인다 (f7 6쪽 6.5GB → 큰 것부터면 뒤 묶음이 빈자리에 들어감)
-    for (BH, BW), jobs in sorted(groups.items(), key=lambda g: -min(len(g[1]), MAX_BATCH) * g[0][0] * g[0][1]):
-        for i in range(0, len(jobs), MAX_BATCH):
-            chunk = jobs[i:i + MAX_BATCH]
-            crops, masks = [], []
-            for x1, y1, x2, y2, cx1, cy1, cx2, cy2 in chunk:
-                crop, mk = arr[cy1:cy2, cx1:cx2], page_mask[cy1:cy2, cx1:cx2]
-                ch, cw = crop.shape[:2]
-                crops.append(np.pad(crop, ((0, BH - ch), (0, BW - cw), (0, 0)), mode="reflect"))
-                masks.append(np.pad(mk, ((0, BH - ch), (0, BW - cw)), mode="reflect"))
-            for (x1, y1, x2, y2, cx1, cy1, cx2, cy2), out in zip(chunk, call_lama(crops, masks)):
-                m = page_mask[y1:y2, x1:x2]
-                arr[y1:y2, x1:x2][m] = out[y1 - cy1:y2 - cy1, x1 - cx1:x2 - cx1][m]
+    #묶음 = 같은 크기 조각을 MAX_BATCH 개씩. 큰 묶음부터 돌린다: 작은 것부터 돌리면 뒤의 큰 묶음이 앞에서 받아 둔 메모리에 안 들어가 새로 받아 와서 쌓인다 (f7 6쪽 6.5GB → 큰 것부터면 뒤 묶음이 빈자리에 들어감)
+    #가장 큰 묶음의 예상 메모리가 BATCH_LIMIT 을 넘으면 반으로 쪼개고 다시 정렬한다. 안 넘을 때까지 (f7 19쪽: 768x768 조각 8개 묶음 7.1GB → 4개씩 둘 4.3GB, 지운 그림은 같음)
+    need = lambda b: len(b[2]) * b[0] * b[1] * PIXEL_BYTES
+    batches = sorted(((BH, BW, jobs[i:i + MAX_BATCH]) for (BH, BW), jobs in groups.items() for i in range(0, len(jobs), MAX_BATCH)), key=need, reverse=True)
+    while batches and need(batches[0]) > BATCH_LIMIT and len(batches[0][2]) > 1:
+        BH, BW, jobs = batches.pop(0)
+        half = (len(jobs) + 1) // 2
+        batches = sorted(batches + [(BH, BW, jobs[:half]), (BH, BW, jobs[half:])], key=need, reverse=True)
+    for BH, BW, chunk in batches:
+        crops, masks = [], []
+        for x1, y1, x2, y2, cx1, cy1, cx2, cy2 in chunk:
+            crop, mk = arr[cy1:cy2, cx1:cx2], page_mask[cy1:cy2, cx1:cx2]
+            ch, cw = crop.shape[:2]
+            crops.append(np.pad(crop, ((0, BH - ch), (0, BW - cw), (0, 0)), mode="reflect"))
+            masks.append(np.pad(mk, ((0, BH - ch), (0, BW - cw)), mode="reflect"))
+        for (x1, y1, x2, y2, cx1, cy1, cx2, cy2), out in zip(chunk, call_lama(crops, masks)):
+            m = page_mask[y1:y2, x1:x2]
+            arr[y1:y2, x1:x2][m] = out[y1 - cy1:y2 - cy1, x1 - cx1:x2 - cx1][m]
     return Image.fromarray(arr)
