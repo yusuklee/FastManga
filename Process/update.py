@@ -74,7 +74,8 @@ def _run():
         status.update(state="installing", text="Installing update", pct=None)
         launch = os.path.join(ROOT, "python", "pythonw.exe")
         cmd = f'start "" /wait "{exe}" /SILENT /NORESTART /SUPPRESSMSGBOXES & start "" "{launch}" "{os.path.join(ROOT, "launch.py")}"'
-        subprocess.Popen(["cmd", "/c", cmd], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0), close_fds=True)
+        #명령은 문자열로 넘긴다. 리스트로 넘기면 파이썬이 따옴표를 \" 로 바꿔서 cmd 가 못 읽는다 ("'\\'을(를) 찾을 수 없습니다" 창이 뜨고 설치가 안 됨, 11-26)
+        subprocess.Popen("cmd /c " + cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0), close_fds=True)
         threading.Timer(1.0, lambda: os._exit(0)).start()   # 설치 파일이 앱 파일을 바꿀 수 있게 앱을 끈다
     except Exception as e:   # noqa: BLE001
         print(f"[update] failed: {type(e).__name__}: {e}", flush=True)

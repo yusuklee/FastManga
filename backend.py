@@ -10,7 +10,7 @@ from google.genai import errors as genai_errors
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Text-Boxes"])
 
 
 #처음 PROCESS 할 때 탐지 모델을 메모리에 올린다 (AI 패키지·모델 파일은 앱을 켤 때 launch.py 가 받는다). 그 전엔 탐지·OCR·지우기 라우트가 409 를 돌려준다
@@ -154,7 +154,10 @@ async def restore_route(file: UploadFile, erased: UploadFile, contents: str = Fo
 async def sfx_render_route(file: UploadFile, erased: UploadFile, contents: str = Form(...)):
     models()
     from Process.sfx_style import render_page
-    return png_response(render_page(Image.open(io.BytesIO(await file.read())), Image.open(io.BytesIO(await erased.read())), json.loads(contents)))
+    placed = {}   # 상자 id → 글자가 그려진 자리. 응답 머리(X-Text-Boxes)에 실어 보낸다 (화면에서 글자를 눌러 고르고 옮기는 데 씀, 11-27)
+    r = png_response(render_page(Image.open(io.BytesIO(await file.read())), Image.open(io.BytesIO(await erased.read())), json.loads(contents), placed))
+    r.headers["X-Text-Boxes"] = json.dumps(placed)
+    return r
 
 
 #데스크톱 앱 내보내기: 프런트가 캔버스로 그린 PNG 를 폴더 경로와 함께 보내면 그 폴더에 쓴다.

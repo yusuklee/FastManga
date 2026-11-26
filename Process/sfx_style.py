@@ -1,5 +1,6 @@
 #효과음 렌더: 글자색(SAM 2.1 마스크 직사각형 안 enclosed_colors)·회전·크기·늘이기는 원본에서 잰다. 테두리 = 흰색(글자와 대비 3 미만이면 #111111), 글자 크기의 5.5%. 획 굵기는 폰트 그대로, 기울이기는 쓰지 않는다. 글자 목록에서 고른 색(color_set·stroke_set)이 있으면 그 색
-import os, math, threading
+import os, math, threading, hashlib
+from functools import lru_cache
 import numpy as np, cv2
 from PIL import Image, ImageDraw, ImageFont
 from Process.inpaint import decode
@@ -166,6 +167,12 @@ def shear_rotate(a, skew, rot, stretch=1.0):
     return crop_ink(a)
 
 
+#글자 모양 하나(쌓기 → 늘이기 → 기울이기 → 회전)를 기억해 둔다 (11-27): 색이나 다른 상자의 글자만 바꿔 다시 그릴 때 안 바뀐 상자는 다시 만들지 않게. lines 는 줄마다 글자 튜플. 돌려준 배열은 고치지 말 것
+@lru_cache(maxsize=512)
+def block(font, lines, vertical, small, skew, rot, stretch):
+    return shear_rotate(text_block(font_paths()[font], lines, vertical, small), skew, rot, stretch)
+
+
 #상자에 맞게 줄이고, 남는 쪽은 STRETCH 배까지 늘려 채운다
 def fit_region(a, rw, rh):
     h, w = a.shape
@@ -202,14 +209,16 @@ def render_box(bg, lines, st, region):
     x1, y1, x2, y2 = region[0] * W, region[1] * H, region[2] * W, region[3] * H
     rw, rh = max(8, x2 - x1), max(8, y2 - y1)
     vertical = rh > rw * 1.1 and max(len(l) for l in lines) > 1
-    m = text_block(font_paths()[st["font"]], lines, vertical, st["small"])
-    m = shear_rotate(m, st["skew"], st["rotate"], st["stretch"])
-    m = fit_region(m, rw, rh)
-    if st.get("cap"):   # 글자 크기는 원본에서 잰 크기(font_size)를 넘지 않는다 (Settings 와 같은 상한, 11-22). 가로쓰기는 늘이기만큼 세로가 길어서 나눠서 잰다
-        em = (m.shape[1] if vertical else m.shape[0]) / max(1, len(lines)) / (1 if vertical else st["stretch"])
-        if em > st["cap"]:
-            k = st["cap"] / em
-            m = cv2.resize(m, (max(1, int(m.shape[1] * k)), max(1, int(m.shape[0] * k))), interpolation=cv2.INTER_AREA)
+    m = block(st["font"], tuple(map(tuple, lines)), vertical, st["small"], st["skew"], st["rotate"], st["stretch"])
+    em = lambda: (m.shape[1] if vertical else m.shape[0]) / max(1, len(lines)) / (1 if vertical else st["stretch"])   # 글자 한 칸의 크기(px). 가로쓰기는 늘이기만큼 세로가 길어서 나눠서 잰다
+    scale = lambda k: cv2.resize(m, (max(1, int(m.shape[1] * k)), max(1, int(m.shape[0] * k))), interpolation=cv2.INTER_AREA)
+    if st.get("size"):   # 글자 목록에서 크기를 직접 정했으면(Size px) 상자에 맞추지 않고 그 크기로 (넘쳐도 그대로, 대사와 같음. 11-27)
+        #Size px = 폰트 크기 (글자 덩어리는 폰트 EM px 로 만들어 둔 것). 덩어리의 폭·높이로 재면 기울어진 글자·두 글자짜리가 더 작게 나와 같은 숫자인데 크기가 달랐다 (24쪽 40px: 세로 62~116px)
+        m = scale(st["size"] / EM)
+    else:
+        m = fit_region(m, rw, rh)
+        if st.get("cap") and em() > st["cap"]:   # 글자 크기는 원본에서 잰 크기(font_size)를 넘지 않는다 (Settings 와 같은 상한, 11-22)
+            m = scale(st["cap"] / em())
     #효과음 (11-20 결정): 획 굵기는 폰트 그대로, 테두리 = 글자 크기의 5.5% (0.35~4px), outline 이 None 이면 테두리 없음
     size = (m.shape[1] if vertical else m.shape[0]) / max(1, len(lines))
     m = np.pad(m, 8)
@@ -218,7 +227,7 @@ def render_box(bg, lines, st, region):
     px, py = int((x1 + x2) / 2 - m.shape[1] / 2), int((y1 + y2) / 2 - m.shape[0] / 2)
     for mask, c in layers:
         out.paste(c, (px, py), Image.fromarray(mask))
-    return np.array(out)
+    return np.array(out), (px + 8, py + 8, px + m.shape[1] - 8, py + m.shape[0] - 8)   # 그린 그림, 글자가 놓인 자리(bg 기준. 테두리용 여백 8 은 뺌)
 
 
 #원본과 지운 그림이 다른 곳 = 지운 글자
@@ -261,6 +270,17 @@ def measure(page, pos):
     return dict(tilt=0.0, area=int(fill.sum()), color=unit(color))
 
 
+#같은 페이지의 같은 상자는 한 번만 잰다 (11-27): 색·글자를 바꿀 때마다 그 쪽 효과음을 전부 다시 그리는데, 재는 데 절반이 들었다. key = 페이지 그림의 md5
+_measured = {}
+def measure_once(key, page, pos):
+    k = (key, *pos)
+    if k not in _measured:
+        if len(_measured) >= 2048:
+            _measured.pop(next(iter(_measured)))
+        _measured[k] = measure(page, pos)
+    return _measured[k] and dict(_measured[k])   # 받은 쪽이 tilt·color 를 고쳐 쓰니 사본을
+
+
 #글자 줄의 기울기(도). 세로축 기준, + 면 아래가 오른쪽. 덩어리가 길쭉하지 않으면(글자 하나 등) 방향이 없어 0
 def tilt(d):
     ys, xs = np.nonzero(d)
@@ -295,8 +315,8 @@ def min_rect(mask):
 def rect_region(rect, lines, st, W, H):
     cx, cy, rw, rh, _ = rect
     vertical = rh > rw * 1.1 and max(len(l) for l in lines) > 1
-    g = text_block(font_paths()[st["font"]], lines, vertical, st["small"])
-    flat, turned = shear_rotate(g, st["skew"], 0, st["stretch"]), shear_rotate(g, st["skew"], st["rotate"], st["stretch"])
+    shape = lambda rot: block(st["font"], tuple(map(tuple, lines)), vertical, st["small"], st["skew"], rot, st["stretch"])
+    flat, turned = shape(0), shape(st["rotate"])
     k = min(rw / flat.shape[1], rh / flat.shape[0])   # 늘이기·기울이기까지 한 모양이 직사각형에 먼저 닿는 쪽
     bw, bh = turned.shape[1] * k, turned.shape[0] * k
     return (cx - bw / 2) / W, (cy - bh / 2) / H, (cx + bw / 2) / W, (cy + bh / 2) / H
@@ -368,8 +388,10 @@ def dedup(contents, textmask=None):
     return [{k: v for k, v in c.items() if k not in ("_n", "_t", "_d")} for c in kept]
 
 
-def render_page(original, erased, contents):
-    """original·erased: PIL 페이지. contents: [{pos, mask_area?, word, box_word?, translated, group?, letter?, mask?, font?, small?, stretch?, color_set?, stroke_set?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
+def render_page(original, erased, contents, placed=None):
+    """original·erased: PIL 페이지. contents: [{id?, pos, mask_area?, word, box_word?, translated, group?, letter?, mask?, font?, small?, stretch?, color_set?, stroke_set?, size?, move?}]. 효과음만 지운 페이지 위에 그려서 돌려준다
+    move = [dx, dy]: 글자를 원래 자리에서 이만큼 옮겨 그린다(px). 화면에서 글자를 끌어서 정한다 (11-27)
+    placed 에 dict 를 주면 상자 id → 글자가 그려진 자리 [x1, y1, x2, y2] 를 채운다 (화면이 그 자리를 눌러 글자를 고르게)
     폰트는 상자에 있으면 그 폰트, 없거나 Auto 면 글자 크기로 고른다(auto_font). 늘이기는 글자 마스크로 잰다(마스크가 없으면 1.0, 이은 상자는 box_word 글자 수). 기울이기는 쓰지 않는다
     이은 상자(group 이 같음)는 가장 크게 잰 상자의 폰트만 같이 쓴다. 글자 마스크가 있으면 회전·크기를 그걸 감싸는 가장 작은 직사각형으로: 그 기울기로 돌리고, 그 안에서 키우다 닿으면 멈춘다"""
     page = original.convert("RGB")
@@ -377,6 +399,7 @@ def render_page(original, erased, contents):
     out = np.array(erased.convert("RGB"))
     H, W = out.shape[:2]
     items = []
+    page_key = hashlib.md5(src.tobytes()).digest()
     with _lock:
         for c in dedup([c for c in contents if (c.get("translated") or "").strip()], text_mask(original, erased)):
             px1, py1, px2, py2 = [int(v) for v in c["pos"]]
@@ -398,7 +421,7 @@ def render_page(original, erased, contents):
                 letter[ay1 - by1:ay1 - by1 + k.shape[0], ax1 - bx1:ax1 - bx1 + k.shape[1]] = k
                 if letter.sum() < 50:
                     letter = None
-            m = measure(page, (max(0, px1), max(0, py1), min(W, px2), min(H, py2)))   # 효과음: SAM 2.1 마스크 → 직사각형 → 직사각형에서 색 (sfx_colors)
+            m = measure_once(page_key, page, (max(0, px1), max(0, py1), min(W, px2), min(H, py2)))   # 효과음: SAM 2.1 마스크 → 직사각형 → 직사각형에서 색 (sfx_colors)
             if m is None:
                 continue
             #기울기는 글자 상자(pos) 안의 지운 어두운 잉크로 잰다 (지운 영역 mask_area 는 넓어서 옆 그림 선까지 걸리고, 흰 테두리는 방향을 흐린다)
@@ -434,8 +457,16 @@ def render_page(original, erased, contents):
                 it["font"] = lead["font"]
         for it in items:
             m = it["m"]
-            st = dict(font=it["font"], skew=it["skew"], small=it["small"], stretch=it["stretch"], rotate=m["tilt"], color=m["color"], outline=m["outline"], cap=it["c"].get("font_size"))
+            dx, dy = it["c"].get("move") or (0, 0)
+            st = dict(font=it["font"], skew=it["skew"], small=it["small"], stretch=it["stretch"], rotate=m["tilt"], color=m["color"], outline=m["outline"], cap=it["c"].get("font_size"), size=it["c"].get("size"))
             bx1, by1, bx2, by2 = it["box"]
             region = rect_region(it["rect"], it["lines"], st, bx2 - bx1, by2 - by1) if it["rect"] else it["region"]
-            out[by1:by2, bx1:bx2] = render_box(out[by1:by2, bx1:bx2], it["lines"], st, region)
+            if st["size"] or dx or dy:   # 크기를 직접 정했거나 옮긴 글자는 상자 밖으로 나갈 수 있어서 페이지 전체에 그린다 (자리는 같은 가운데 + move)
+                r = region
+                out, at = render_box(out, it["lines"], st, ((bx1 + r[0] * (bx2 - bx1) + dx) / W, (by1 + r[1] * (by2 - by1) + dy) / H, (bx1 + r[2] * (bx2 - bx1) + dx) / W, (by1 + r[3] * (by2 - by1) + dy) / H))
+            else:
+                out[by1:by2, bx1:bx2], at = render_box(out[by1:by2, bx1:bx2], it["lines"], st, region)
+                at = (at[0] + bx1, at[1] + by1, at[2] + bx1, at[3] + by1)
+            if placed is not None and it["c"].get("id") is not None:
+                placed[it["c"]["id"]] = [int(v) for v in at]
     return Image.fromarray(out)

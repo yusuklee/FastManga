@@ -143,7 +143,9 @@ class Boot:
                 except Exception:   # noqa: BLE001  아직 안 떴다
                     pass
                 time.sleep(0.5)
-            self.window.load_url(self.url)
+            #주소 끝에 화면 파일의 날짜를 붙인다: 웹뷰가 예전 index.html 을 기억하고 있으면 업데이트 뒤에도 옛 화면이 뜬다 (11-27). 설정은 주소가 아니라 포트별로 저장돼서 그대로다
+            index = os.path.join(ROOT, "frontend", "dist", "index.html")
+            self.window.load_url(f"{self.url}/?v={int(os.path.getmtime(index)) if os.path.exists(index) else 0}")
         except Exception as e:   # noqa: BLE001
             print(f"[launch] failed: {type(e).__name__}: {e}", flush=True)
             self.set(str(e)[:300], error=True)

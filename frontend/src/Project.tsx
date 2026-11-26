@@ -8,7 +8,7 @@ import { ProcessDialog, type DetectWhat } from "./components/editor/processdialo
 import { PageList } from "./components/editor/pagelist";
 import { RepeatButton } from "./components/editor/repeatbutton";
 import { Toasts, describeError, type Toast } from "./components/editor/toast";
-import { ensureFont, loadImage, loadMasks, renderPage, renderToPng, parallel } from "./components/editor/render";
+import { ensureFont, loadImage, loadMasks, renderPage, renderToPng, parallel, type Frame } from "./components/editor/render";
 import { pickFolder, saveToFolder, pageFileName, downloadZip, type ExportFile, isDesktopApp, pickFolderDesktop, saveToFolderDesktop } from "./components/editor/export";
 
 import { API } from "./api";
@@ -43,6 +43,7 @@ export type Content = {
   stroke?: string | null; //테두리색 (원본 글자에 테두리가 있을 때)
   color_set?: string; //사용자가 글자 목록에서 고른 글자색. 있으면 잰 색 대신 쓴다
   stroke_set?: string | null; //사용자가 고른 테두리색. null = 테두리 없음, 없으면 잰 값
+  move?: [number, number]; //화면에서 번역 글자를 끌어 옮긴 양(px). 그릴 때 원래 자리에서 이만큼 옮긴다
   stroke_width?: number | null; //원본 테두리 굵기(px). 없으면 글자 크기의 1/12 로 그린다
   thick?: number; //원본 획 굵기(px). 번역문 획을 이 굵기에 맞춘다
 };
@@ -100,10 +101,11 @@ const settle = (res: PromiseSettledResult<Record<string, string>>[]) => {
   return { translations, error };
 };
 //이은 상자: 첫 상자의 묶음 번역문을 상자 넓이 비율대로 글자를 나눠 순서대로 각 상자에 넣는다 (같은 크기 2개에 4글자면 2·2, 3:1 이면 3·1)
-const splitGroups = (contents: Content[]) => {
+//only: 이 묶음들만 나눈다 (이번에 번역이 새로 들어온 묶음. 다른 묶음은 상자마다 손으로 고친 번역이 있을 수 있어 건드리지 않는다)
+const splitGroups = (contents: Content[], only: Set<number>) => {
   const out = contents.map((c) => ({ ...c }));
   const groups = new Map<number, Content[]>();
-  for (const c of out) if (c.group != null) groups.set(c.group, [...(groups.get(c.group) ?? []), c]);
+  for (const c of out) if (c.group != null && only.has(c.group)) groups.set(c.group, [...(groups.get(c.group) ?? []), c]);
   for (const g of groups.values()) {
     g.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     const chars = [...(g[0].groupText ?? "").replace(/\s+/g, "")];
@@ -127,11 +129,16 @@ const splitGroups = (contents: Content[]) => {
   return out;
 };
 //번역 결과를 상자에 넣는다. 묶음 첫 상자의 번역은 묶음 전체 번역문이라 groupText 로도 둔다
-const applyTranslations = (contents: Content[], tr: (c: Content) => string | undefined) =>
-  splitGroups(contents.map((c) => {
+const applyTranslations = (contents: Content[], tr: (c: Content) => string | undefined) => {
+  const got = new Set<number>();
+  return splitGroups(contents.map((c) => {
     const t = tr(c);
+    if (t && c.group != null) got.add(c.group);
     return { ...c, translated: t ?? c.translated, ...(t && c.group != null ? { groupText: t } : {}) };
-  }));
+  }), got);
+};
+//a 가 b 안에 대부분(60% 넘게) 들어가는가
+const inside = (a: area, b: area) => Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) * Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1])) > 0.6 * (a[2] - a[0]) * (a[3] - a[1]);
 const sfxTargets = (contents: Content[]) => contents.filter((c) => c.sfx && c.translated?.trim());
 const nonSfx = (contents: Content[]) => {
   const sfx = sfxTargets(contents).filter((s) => !s.user);   //사용자가 그린 효과음 상자는 탐지 중복이 아니니 그 안의 대사를 빼지 않는다
@@ -151,8 +158,17 @@ const post_pair = async (path: string, page: string, erased: string, contents: P
   if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
   return URL.createObjectURL(await r.blob());
 };
-const post_sfx = (page: string, erased: string, contents: Content[], sfxFont: string) =>   //sfxFont: 설정의 효과음 폰트. 상자에 폰트가 따로 정해져 있으면 그 폰트
-  post_pair("sfx_render", page, erased, sfxTargets(contents).map(({ pos, mask_area, word, box_word, translated, group, letter, mask, font, font_size, angle, color_set, stroke_set }) => ({ pos, mask_area, word, box_word, translated, group, letter, mask: letter ? mask : undefined, font: font ?? sfxFont, font_size, angle, color_set, stroke_set })));   //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
+//효과음을 그린 그림과, 상자 id → 글자가 그려진 자리(응답 머리 X-Text-Boxes. 화면에서 그 자리를 눌러 글자를 고른다)
+const post_sfx = async (page: string, erased: string, contents: Content[], sfxFont: string) => {   //sfxFont: 설정의 효과음 폰트. 상자에 폰트가 따로 정해져 있으면 그 폰트
+  const form = new FormData();
+  form.append("file", await (await fetch(page)).blob(), "image.png");
+  form.append("erased", await (await fetch(erased)).blob(), "erased.png");
+  //group: 이은 상자는 글씨체를 같이 쓴다. 사람이 그린 상자는 글자 마스크(SAM 2.1)도 보내 그걸로 잰다
+  form.append("contents", JSON.stringify(sfxTargets(contents).map(({ id, pos, mask_area, word, box_word, translated, group, letter, mask, font, font_size, angle, color_set, stroke_set, size, move }) => ({ id, pos, mask_area, word, box_word, translated, group, letter, mask: letter ? mask : undefined, font: font ?? sfxFont, font_size, angle, color_set, stroke_set, size, move }))));
+  const r = await fetch(`${API}/sfx_render`, { method: "POST", body: form });
+  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
+  return { image: URL.createObjectURL(await r.blob()), boxes: JSON.parse(r.headers.get("X-Text-Boxes") ?? "{}") as { [id: string]: area } };
+};
 
 export function Project({
   project,
@@ -233,7 +249,10 @@ export function Project({
     for (const p of project.pages) if (project.contents[p.file]) out[`${API}${p.url}`] = project.contents[p.file];
     return out;
   });
-  const [selectedArea, setSelectedArea] = useState<string | null>(null);
+  //고른 글자들(상자 id). 하나만 골랐으면 TEXT 목록에서 그 항목이 펼쳐진다. Ctrl+클릭이나 목록 위의 All / Dialogue / SFX 버튼으로 여러 개를 고른다 (11-27)
+  const [selected, setSelected] = useState<number[]>([]);
+  //add(Ctrl+클릭): 고른 것에 넣거나 뺀다. 아니면 그것 하나만 고른다 (이미 그것 하나만 골라져 있으면 푼다 = 목록 항목 접기)
+  const pick = useCallback((id: number, add: boolean) => setSelected((cur) => (add ? (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]) : cur.length === 1 && cur[0] === id ? [] : [id])), []);
   const [progress, setProgress] = useState(""); //진행 상황 / 에러 (하단 표시)
   const [callBar, setCallBar] = useState<boolean[] | null>(null); //TRANSLATE 중 호출별 도착 여부 (하단 칸 막대). null = 막대 없음
   type View = "original" | "inpainted" | "rendered";
@@ -280,7 +299,10 @@ export function Project({
     return out;
   }); //페이지별로 글자를 지운 이미지 (blob URL 또는 저장된 파일 URL)
   const [sfxImgs, setSfxImgs] = useState<{ [page: string]: string }>({}); //지운 이미지 위에 효과음까지 그린 것 (blob URL). 번역 뷰·내보내기의 바탕
+  const [sfxBoxes, setSfxBoxes] = useState<{ [page: string]: { [id: string]: area } }>({}); //그 그림에서 효과음 글자가 그려진 자리 (상자 id 별)
   const sfxKeys = useRef<{ [page: string]: string }>({}); //마지막으로 그린 조건 (지운 이미지 + 효과음 번역문). 같으면 다시 안 그린다
+  const sfxWants = useRef<{ [page: string]: { key: string; contents?: Content[]; erased?: string; font: string } }>({}); //페이지별로 가장 마지막에 그려 달라고 한 조건
+  const sfxRuns = useRef<{ [page: string]: Promise<void> }>({}); //페이지별로 지금 돌고 있는 효과음 그리기 (끝나면 지워짐)
 
   //자동 저장 (코하루처럼): 상자·번역이 바뀌면 0.8초 뒤 project.json 에 씀. 첫 렌더는 건너뜀
   const firstSave = useRef(true);
@@ -406,7 +428,6 @@ const handle_detect = async (page=selectedPage!)=>{
   const mine = (pageContents[page] ?? []).filter((c) => c.user);
   //사용자가 그린 상자가 이긴다: 같은 종류(대사/효과음)의 사용자 상자 안에 대부분 들어가는 탐지 상자는 버린다
   //(종류가 다르면 남긴다. 큰 효과음 상자 안의 말풍선 대사 등)
-  const inside = (a: area, b: area) => Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) * Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1])) > 0.6 * (a[2] - a[0]) * (a[3] - a[1]);
   const detected = found.filter((d) => !mine.some((u) => !!u.sfx === !!d.sfx && inside(d.pos, u.pos))).map((d, i) => ({ ...d, id: i }));
   const users = mine.map((c, i) => ({ ...c, id: detected.length + i, word: "", translated: undefined }));
   const contents = [...detected, ...users];
@@ -415,9 +436,16 @@ const handle_detect = async (page=selectedPage!)=>{
 }
 
 //OCR: 페이지의 상자 전부(탐지 + ＋)를 읽는다. 원문·지우기 마스크·글자 크기·색·기울기가 채워진다
+//boxes 만 읽어서 돌려준다 (화면에는 안 넣음). 손으로 정한 서식(글자색·테두리·폰트·크기)은 다시 읽어도 남긴다 (11-27)
+const read_boxes = async (page: string, boxes: Content[]) => {
+  if (!boxes.length) return boxes;
+  const res: Content[] = await post_image("ocr", page, boxes.map(({ id, pos, bubble, bubble_area, bubble_mask, user, sfx, group, order }) => ({ id, pos, bubble, bubble_area, bubble_mask, user, sfx, group, order })) as Content[], { ocr: settings.ocr });
+  const style = new Map(boxes.map(({ id, color_set, stroke_set, font, size, move }) => [id, { ...(color_set !== undefined && { color_set }), ...(stroke_set !== undefined && { stroke_set }), ...(font !== undefined && { font }), ...(size !== undefined && { size }), ...(move !== undefined && { move }) }]));
+  return res.map((c) => ({ ...c, ...style.get(c.id) }));
+};
 const handle_ocr = async (page: string, contents: Content[] = pageContents[page] ?? []) => {
   if (!contents.length) return contents;
-  const res: Content[] = await post_image("ocr", page, contents.map(({ id, pos, bubble, bubble_area, bubble_mask, user, sfx, group, order }) => ({ id, pos, bubble, bubble_area, bubble_mask, user, sfx, group, order })) as Content[], { ocr: settings.ocr });
+  const res = await read_boxes(page, contents);
   setPageContents((prev) => ({ ...prev, [page]: res }));
   return res;
 }
@@ -492,7 +520,9 @@ const handle_inpaint=async(inpaint_model:string=inpaintModel,page=selectedPage!,
     const contents = target ?? pageContents[page];
     if (!contents || !contents.length)return;
     await prepareModels();
-    setErased(page, await post_inpaint(inpaint_model,page,contents,base));
+    const image = await post_inpaint(inpaint_model,page,contents,base);
+    setErased(page, image);
+    return image;
 }
 //지운 이미지를 바꾸고 저장한다 (저장은 기다리지 않음)
 const setErased = (page: string, image: string) => {
@@ -505,17 +535,29 @@ const setErased = (page: string, image: string) => {
   //효과음 렌더 갱신: 지운 이미지가 있고 번역된 의성어 상자가 있으면 백엔드에 그려 달라고 한다. 조건이 전과 같으면 건너뜀
   const ensureSfx = async (page: string, contents = pageContents[page], erased = inpaintedImgs[page]) => {
     const targets = contents ? sfxTargets(contents) : [];
-    const key = erased && targets.length ? `${erased}|${sfxFont.family}|${targets.map((c) => `${c.id}:${c.translated}:${c.pos.join(",")}:${c.font ?? ""}:${c.color_set ?? ""}:${c.stroke_set === undefined ? "auto" : c.stroke_set}`).join("|")}` : "";
-    if (sfxKeys.current[page] === key) return;
+    const key = erased && targets.length ? `${erased}|${sfxFont.family}|${targets.map((c) => `${c.id}:${c.translated}:${c.pos.join(",")}:${c.font ?? ""}:${c.color_set ?? ""}:${c.stroke_set === undefined ? "auto" : c.stroke_set}:${c.size ?? ""}:${c.move?.join(",") ?? ""}`).join("|")}` : "";
+    if (sfxKeys.current[page] === key) return sfxRuns.current[page];
     sfxKeys.current[page] = key;
-    const image = key ? await prepareModels().then(() => post_sfx(page, erased!, contents!, sfxFont.family)).catch((e) => { setProgress(`SFX render error: ${(e as Error).message}`); return undefined; }) : undefined;
-    if (sfxKeys.current[page] !== key) return; //그 사이 조건이 바뀌었으면 버린다
-    setSfxImgs((prev) => {
-      if (prev[page]?.startsWith("blob:")) URL.revokeObjectURL(prev[page]);
-      const next = { ...prev };
-      if (image) next[page] = image; else delete next[page];
-      return next;
-    });
+    sfxWants.current[page] = { key, contents, erased, font: sfxFont.family };
+    //그리는 중이면 새 요청을 보내지 않는다. 지금 것이 끝나면 그때의 마지막 조건으로 한 번 더 그린다 (11-27)
+    //전에는 색 창에서 끌거나 글자를 칠 때마다 요청이 하나씩 쌓였고, 마지막 것이 끝나야 화면이 바뀌어서 30번 바꾸면 63초 뒤에 보였다
+    return (sfxRuns.current[page] ??= (async () => {
+      try {
+        for (;;) {
+          const w = sfxWants.current[page];
+          const res = w.key ? await prepareModels().then(() => post_sfx(page, w.erased!, w.contents!, w.font)).catch((e) => { setProgress(`Render error: ${(e as Error).message}`); return undefined; }) : undefined;
+          if (sfxKeys.current[page] === undefined) break; //그 사이 이 페이지의 상자를 다 지웠다 → 버린다
+          setSfxImgs((prev) => {
+            if (prev[page]?.startsWith("blob:")) URL.revokeObjectURL(prev[page]);
+            const next = { ...prev };
+            if (res) next[page] = res.image; else delete next[page];
+            return next;
+          });
+          setSfxBoxes((prev) => ({ ...prev, [page]: res?.boxes ?? {} }));
+          if (sfxWants.current[page].key === w.key) break; //그리는 동안 더 안 바뀌었다
+        }
+      } finally { delete sfxRuns.current[page]; }
+    })());
   };
   const handle_all = async (targets:string[]=pages)=>{
     const gid = (pageIndex:number, id:number)=> pageIndex*10000+id;
@@ -536,12 +578,28 @@ const setErased = (page: string, image: string) => {
         requests.push(req);
     };
     const reused = new Set<string>();
+    const added: PageContents = {};   //전에 처리한 쪽에서 이번에 새로 읽은 상자 (그 상자만 더 지운다)
+    const erasedNow: { [page: string]: string | undefined } = {};   //이번에 새로 만든 지운 그림. inpaintedImgs 는 이 함수가 시작할 때 값이라 그 뒤 바뀐 것을 모른다
     for (const [page_num ,page ] of targets.entries()){
         const prev = pageContents[page];
-        //전에 찾은 상자를 다시 쓴다. 단 효과음을 켰는데 전에 효과음 없이 찾았으면 새로 찾는다
-        if (prev?.length && prev.every((c) => c.mask) && (!detectWhat.current.sfx || prev.some((c) => c.sfx))) {
+        const sameKind = !detectWhat.current.sfx || !!prev?.some((c) => c.sfx);   //효과음을 켰는데 전에 효과음 없이 찾았으면 새로 찾는다
+        const regroup = new Set((prev ?? []).filter((c) => !c.mask && c.group != null).map((c) => c.group));
+        const unread = (prev ?? []).filter((c) => !c.mask || (c.group != null && regroup.has(c.group)));   //아직 안 읽은 상자 (새로 그렸거나 잇기를 바꾼 것). 묶음은 통째로
+        //전에 찾은 상자를 다시 쓴다
+        if (prev?.length && !unread.length && sameKind) {
             detected[page] = prev;
             reused.add(page);
+        } else if (prev && unread.length < prev.length && sameKind && inpaintedImgs[page]) {
+            //전에 처리한 쪽에 안 읽은 상자가 있다 → 그 상자만 읽고, 지운 그림 위에 그 자리만 더 지우고, 그 상자만 번역한다 (11-27. 전에는 쪽 전체를 처음부터 다시 했고 다른 상자의 색·크기가 사라졌다)
+            setProgress(`OCR ${page_num+1}/${targets.length}`);
+            const old = new Map(prev.filter((c) => !unread.includes(c) && c.word && c.translated).map((c) => [c.word, c.groupText ?? c.translated]));   //원문이 같으면 전 번역을 옮겨서 다시 번역하지 않는다
+            const read = applyTranslations(await read_boxes(page, unread), (c) => old.get(c.word));
+            //사용자가 그린 상자가 이긴다: 새로 그린 상자 안에 대부분 들어가는 같은 종류의 탐지 상자는 뺀다 (handle_detect 와 같은 규칙)
+            const mine = read.filter((c) => c.user);
+            const kept = prev.filter((c) => unread.includes(c) || c.user || !mine.some((u) => !!u.sfx === !!c.sfx && inside(c.pos, u.pos)));
+            detected[page] = kept.flatMap((c) => (unread.includes(c) ? read.filter((r) => r.id === c.id) : [c]));
+            added[page] = read;
+            setPageContents((p) => ({ ...p, [page]: detected[page] }));
         } else {
             setProgress(`DETECT ${page_num+1}/${targets.length}`);
             const old = new Map((prev ?? []).filter((c) => c.word && c.translated).map((c) => [c.word, c.groupText ?? c.translated]));   //원문이 같으면 전 번역을 옮겨서 다시 번역하지 않는다
@@ -555,7 +613,7 @@ const setErased = (page: string, image: string) => {
     for (const [i, page] of targets.entries()) {
       if (reused.has(page) && inpaintedImgs[page]) continue;
       setProgress(`INPAINT ${i + 1}/${targets.length} `);
-      await handle_inpaint(inpaintModel, page, detected[page]);
+      erasedNow[page] = added[page] ? await handle_inpaint(inpaintModel, page, added[page], inpaintedImgs[page]) : await handle_inpaint(inpaintModel, page, detected[page]);
     }
 
     setProgress("Waiting for translation...");
@@ -567,8 +625,8 @@ const setErased = (page: string, image: string) => {
     setPageContents((prev) => ({ ...prev, ...done }));
     for (const [i, page] of targets.entries()) {
       if (!sfxTargets(done[page]).length) continue;
-      setProgress(`SFX ${i + 1}/${targets.length}`);
-      await ensureSfx(page, done[page]);
+      setProgress(`RENDER ${i + 1}/${targets.length}`);
+      await ensureSfx(page, done[page], erasedNow[page] ?? inpaintedImgs[page]);
     }
     setView("rendered");
     if (error) throw error;
@@ -739,6 +797,9 @@ const setErased = (page: string, image: string) => {
   useEffect(() => {
     if (selectedPage && curInpainted) void ensureSfx(selectedPage, curContents, curInpainted);
   }, [selectedPage, curInpainted, curContents, sfxFont.family]);
+  //화면에 그려진 번역 글자의 자리 (상자 id 별): 대사는 캔버스가 그리며 알려준 것(frames), 효과음은 백엔드가 알려준 것(sfxBoxes)
+  const [frames, setFrames] = useState<Map<number, Frame>>(new Map());
+  const sfxFrames = useMemo(() => new Map(Object.entries((selectedPage && sfxBoxes[selectedPage]) || {}).map(([id, [x1, y1, x2, y2]]) => [Number(id), { cx: (x1 + x2) / 2, cy: (y1 + y2) / 2, x: (x1 - x2) / 2, y: (y1 - y2) / 2, w: x2 - x1, h: y2 - y1, angle: 0 } as Frame])), [sfxBoxes, selectedPage]);
   const hasInpainted = !!curInpainted;
   const hasRendered = !!curContents?.some((c) => c.translated);
   const shownView: View = view === "rendered" && hasRendered ? "rendered" : view !== "original" && hasInpainted ? "inpainted" : "original";
@@ -754,7 +815,7 @@ const setErased = (page: string, image: string) => {
       const image = await loadImage(shownView === "original" ? selectedPage : (withSfx ? curSfx : curInpainted) ?? selectedPage);
       await loadMasks(curContents ?? []);
       if (stale) return;
-      renderPage(canvas, image, withSfx ? nonSfx(curContents ?? []) : curContents ?? [], font, shownView === "rendered", curContents ?? []);
+      setFrames(renderPage(canvas, image, withSfx ? nonSfx(curContents ?? []) : curContents ?? [], font, shownView === "rendered", curContents ?? []));
       setImgSize([image.naturalWidth, image.naturalHeight]);
     })().catch((e) => setProgress(`Error: ${(e as Error).message}`));
     return () => {
@@ -840,6 +901,44 @@ const setErased = (page: string, image: string) => {
   };
 
   const contents = pageContents[selectedPage!] ?? [];
+  useEffect(() => setSelected([]), [selectedPage]);   //쪽을 바꾸면 고른 것을 푼다 (상자 id 는 쪽마다 따로라 다른 쪽의 같은 번호가 골라진다)
+  const withSfxShown = shownView === "rendered" && !!curSfx;
+  const shownFrames = useMemo(() => new Map([...frames, ...(withSfxShown ? sfxFrames : [])]), [frames, sfxFrames, withSfxShown]);
+  //번역 글자 끌어 옮기기(dx, dy). 끄는 동안은 테두리만 따라가고, 놓으면 상자에 적어 다시 그린다
+  //done: 놓은 뒤 새 그림이 올 때까지(효과음은 0.5초쯤) 테두리를 놓은 자리에 둔다
+  const [textDrag, setTextDrag] = useState<{ id: number; sx: number; sy: number; dx: number; dy: number; done?: boolean } | null>(null);
+  const startTextDrag = (e: React.PointerEvent, id: number) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    if (e.ctrlKey || e.metaKey) return pick(id, true);   //Ctrl+클릭: 고른 것에 넣거나 빼기만 (끌지 않는다)
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    setSelected([id]);
+    const [x, y] = toImg(e);
+    setTextDrag({ id, sx: x, sy: y, dx: 0, dy: 0 });
+  };
+  const onTextMove = (e: React.PointerEvent) => {
+    const d = textDrag;
+    if (!d || d.done) return;
+    const [x, y] = toImg(e);
+    setTextDrag({ ...d, dx: x - d.sx, dy: y - d.sy });
+  };
+  const onTextUp = () => {
+    const d = textDrag, c = d && contents.find((x) => x.id === d.id);
+    if (!d || d.done) return;
+    if (!c || (!d.dx && !d.dy)) return setTextDrag(null);   //안 움직였으면 고르기만
+    editContent(d.id, { move: [(c.move?.[0] ?? 0) + d.dx, (c.move?.[1] ?? 0) + d.dy] });
+    setTextDrag({ ...d, done: true });
+    setTimeout(() => setTextDrag((cur) => (cur === null || cur.id !== d.id || !cur.done ? cur : null)), 4000);   //새 그림이 끝내 안 오면(오류) 테두리를 풀어 준다
+  };
+  const dragFrame = textDrag ? shownFrames.get(textDrag.id) : undefined;
+  useEffect(() => {
+    setTextDrag((cur) => (cur?.done ? null : cur));   //놓은 뒤 그 글자가 새 자리에 그려졌다 → 테두리는 이제 새 자리를 따른다
+  }, [dragFrame]);
+  //고른 여러 상자의 서식을 한 번에 바꾼다 (TEXT 목록 위 Select 줄 아래의 칸, 11-27)
+  const editMany = useCallback((ids: number[], patch: Partial<Content>) => {
+    const page = selectedPage;
+    if (page) setPageContents((prev) => ({ ...prev, [page]: (prev[page] ?? []).map((c) => (ids.includes(c.id) ? { ...c, ...patch } : c)) }));
+  }, [selectedPage]);
   const editContent = useCallback((id: number, patch: Partial<Content>) => {
     const page = selectedPage;
     if (!page) return;
@@ -970,6 +1069,25 @@ const setErased = (page: string, image: string) => {
                       fit === "page" ? `h-auto w-auto max-w-full ${fullscreen ? "max-h-[calc(100vh-5.5rem)]" : "max-h-[calc(100vh-10.5rem)]"}` : "h-auto max-w-full"
                     }`}
                   />
+                  {imgSize[0] > 0 && !addingBox && shownView === "rendered" && shownFrames.size > 0 && (() => {
+                    //번역 글자를 눌러 고른다(TEXT 목록과 같은 선택). 끌면 옮긴다 (11-27)
+                    const pad = imgSize[0] / 250;
+                    const drags = { onPointerMove: onTextMove, onPointerUp: onTextUp, onPointerCancel: onTextUp };
+                    //작은 글자가 큰 글자에 가려 못 누르는 일이 없게 큰 것부터 깐다
+                    return (
+                      <svg className="pointer-events-none absolute inset-0 z-20 h-full w-full touch-none overflow-visible" viewBox={`0 0 ${imgSize[0]} ${imgSize[1]}`} preserveAspectRatio="none">
+                        {[...shownFrames].sort((a, b) => b[1].w * b[1].h - a[1].w * a[1].h).map(([id, f]) => {
+                          const sel = selected.includes(id), d = textDrag?.id === id ? textDrag : null;
+                          return (
+                            <g key={id} transform={`translate(${f.cx + (d?.dx ?? 0)} ${f.cy + (d?.dy ?? 0)}) rotate(${f.angle})`}>
+                              <rect data-text={id} className={`pointer-events-auto cursor-move ${sel ? "stroke-blue-500" : "stroke-transparent hover:stroke-blue-300"}`} x={f.x - pad} y={f.y - pad} width={f.w + 2 * pad} height={f.h + 2 * pad} fill="transparent" strokeWidth={2} strokeDasharray={sel ? undefined : "5 4"} vectorEffect="non-scaling-stroke"
+                                onPointerDown={(e) => startTextDrag(e, id)} {...drags} />
+                            </g>
+                          );
+                        })}
+                      </svg>
+                    );
+                  })()}
                   {imgSize[0] > 0 && (curContents ?? []).some((c) => c.user && !c.word && !c.translated) && (
                     <svg className="pointer-events-none absolute inset-0 z-20 h-full w-full overflow-visible" viewBox={`0 0 ${imgSize[0]} ${imgSize[1]}`} preserveAspectRatio="none">
                       {(curContents ?? []).filter((c) => c.user && !c.word && !c.translated).map((c) => (
@@ -1057,7 +1175,7 @@ const setErased = (page: string, image: string) => {
           {rightOpen && (
             <Panel defaultSize="20%" minSize="14%" className="flex flex-col border-l bg-background">
               <div className="min-h-0 flex-1 overflow-y-auto">
-                <Text contents={contents} fonts={fontChoices} selectedArea={selectedArea} onSelect={setSelectedArea} onEdit={editContent} onRemove={removeBox} onRestore={restoreBox} onCollapse={() => setRightOpen(false)} />
+                <Text contents={contents} fonts={fontChoices} selected={selected} onSelect={pick} onSelectAll={setSelected} onEditMany={editMany} onEdit={editContent} onRemove={removeBox} onRestore={restoreBox} onCollapse={() => setRightOpen(false)} />
               </div>
               {/* 오른쪽 아래: 설정 창 여는 버튼 */}
               <div className="shrink-0 border-t bg-muted/40 p-2">

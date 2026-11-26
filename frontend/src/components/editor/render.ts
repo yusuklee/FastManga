@@ -243,6 +243,10 @@ function contrast(a: string, b: string) {
   return (x + 0.05) / (y + 0.05);
 }
 
+//화면에 그려진 번역 글자 하나의 자리: (cx, cy) 를 축으로 angle(도, 시계 방향) 만큼 돌린 좌표에서 (x, y) 부터 w×h. 이 자리를 눌러 글자를 고르고 끌어 옮긴다
+export type Frame = { cx: number; cy: number; x: number; y: number; w: number; h: number; angle: number };
+
+//돌려주는 것: 상자 id → 그 번역문이 그려진 자리
 export function renderPage(
   canvas: HTMLCanvasElement,
   image: HTMLImageElement,
@@ -251,11 +255,12 @@ export function renderPage(
   withText: boolean,
   all: Content[] = contents
 ) {
+  const frames = new Map<number, Frame>();
   canvas.width = image.naturalWidth;
   canvas.height = image.naturalHeight;
   const ctx = canvas.getContext("2d")!;
   ctx.drawImage(image, 0, 0);
-  if (!withText) return;
+  if (!withText) return frames;
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -281,10 +286,11 @@ export function renderPage(
 
     ctx.font = fontSpec(size, family);
     const step = size * LINE_HEIGHT;
-    //원본 줄이 기울어져 있으면(angle, 시계 방향 +) 상자 가운데를 축으로 돌려서 찍는다
+    //원본 줄이 기울어져 있으면(angle, 시계 방향 +) 상자 가운데를 축으로 돌려서 찍는다. 사용자가 끌어 옮겼으면(move) 그만큼 옮긴다
+    const ox = x1 + w / 2 + (c.move?.[0] ?? 0), oy = y1 + cy + (c.move?.[1] ?? 0), rot = c.angle ?? 0;
     ctx.save();
-    ctx.translate(x1 + w / 2, y1 + cy);
-    if (c.angle) ctx.rotate((c.angle * Math.PI) / 180);
+    ctx.translate(ox, oy);
+    if (rot) ctx.rotate((rot * Math.PI) / 180);
     const top = -(lines.length * step) / 2;
     //글자색·테두리·굵기 (11-22 결정, 효과음과 같은 방식): 글자색 = 원본에서 잰 색, 테두리 = 흰색(글자와 대비 3 미만이면 #111111),
     //테두리는 말풍선 밖 대사만, 굵기 = 글자 크기의 5.5% (0.35~4px), 획 굵기 = 폰트 그대로. 글자 목록에서 고른 색(color_set·stroke_set)이 있으면 그 색
@@ -299,8 +305,12 @@ export function renderPage(
     }
     ctx.fillStyle = color;
     each((line, x, y) => ctx.fillText(line, x, y));
+    const half = lines.map((line) => ctx.measureText(line).width / 2), mid = lines.map((_, i) => (centers ? centers[i] - w / 2 : 0));
+    const left = Math.min(...mid.map((x, i) => x - half[i])), right = Math.max(...mid.map((x, i) => x + half[i]));
+    frames.set(c.id, { cx: ox, cy: oy, x: left, y: top, w: right - left, h: lines.length * step, angle: rot });
     ctx.restore();
   }
+  return frames;
 }
 
 export async function renderToPng(src: string, contents: Content[], font: FontChoice) {

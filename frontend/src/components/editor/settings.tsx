@@ -22,7 +22,7 @@ export type AppSettings = {
 
 export const PROVIDERS: Record<Provider, { label: string; url: string; models: string[]; keyUrl: string }> = {
   gemini: { label: "Gemini", url: "", models: ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"], keyUrl: "https://aistudio.google.com/apikey" },
-  chatgpt: { label: "ChatGPT", url: "https://api.openai.com/v1", models: ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"], keyUrl: "https://platform.openai.com/api-keys" },
+  chatgpt: { label: "ChatGPT", url: "https://api.openai.com/v1", models: ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "gpt-5.4", "gpt-5.2", "gpt-5.1"], keyUrl: "https://platform.openai.com/api-keys" },
   claude: { label: "Claude", url: "", models: ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"], keyUrl: "https://platform.claude.com/settings/keys" },
   openai: { label: "OpenAI", url: "", models: [], keyUrl: "" },
   local: { label: "Local", url: "", models: [], keyUrl: "" },
